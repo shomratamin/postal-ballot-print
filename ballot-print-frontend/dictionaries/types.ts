@@ -1,5 +1,4 @@
-import en from '@/dictionaries/en.json';
-
+import en from "@/dictionaries/en.json";
 
 export type HomeLocale = typeof en.home;
 export type AddressLocale = typeof en.address;
@@ -16,7 +15,9 @@ export type BillLocale = typeof en.bill;
 export type CorporateLocale = typeof en.corporate_user;
 export type ArticleLocale = typeof en.article;
 export type ProfileLocale = typeof en.profile;
-
-
-
-
+export type DashboardLocale = typeof en.dashboard;
+export type BallotLocale = typeof en.ballot;
+export type BatchListLocale = typeof en.batch_list;
+export type EnvelopeListLocale = typeof en.envelope_list;
+export type PrintedListLocale = typeof en.printed_list;
+export type RePrintListLocale = typeof en.reprint_data;

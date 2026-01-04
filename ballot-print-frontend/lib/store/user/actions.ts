@@ -4,11 +4,7 @@ import { User, UserForgetPassword, UserForgetPasswordResponse, UserLoginData, Us
 import { cookies } from "next/headers"
 import { randomBytes } from "crypto"
 import { defaultLanguage, deserialize, initialUserState, serialize } from "./store"
-import fetchProfile from "@/lib/http/user/fetchProfile"
 import { redirect } from "next/navigation"
-import { signupCustomer } from "@/lib/http/user/signupCustomer"
-import { resetPassword } from "@/lib/http/user/resetPassword"
-import { handleForgotPass } from "@/lib/http/user/handleForgotPass"
 import { Locale } from "@/dictionaries/dictionaty"
 
 
@@ -57,11 +53,11 @@ export const get_user_state = async () => {
     // console.log("has_access token", has_token)
     // console.log("access token", token)
 
-    const profile_res = await fetchProfile()
+    // const profile_res = await fetchProfile()
     // console.log("profile res", profile_res)
-    user_state = profile_res.data
+    // user_state = profile_res.data
     // console.log("profile data from backend", user_state)
-    if (!user_state || !profile_res) {
+    if (!user_state) {
         return initialUserState
     }
     return user_state
@@ -148,103 +144,5 @@ export const log_out = async () => {
     // DELETE SESSION FROM COOKIES
     cookieStore.delete("access")
     cookieStore.delete("refresh")
-}
-
-export const signup_user = async (user_data: UserRegisterOtpData): Promise<UserSignupResponse> => {
-    // console.log(user_data)
-    // save temp_user_data to cookie
-    let cookieStore = await cookies()
-    cookieStore.set('temp_data', JSON.stringify(user_data))
-
-    const response = await signupCustomer(user_data)
-
-    if (response.status == "failed") {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    }
-    else if (response.status == "success") {
-        // console.log("response", response)
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    } else {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    }
-
-}
-
-
-export const reset_forgot_password = async (user_data: changePasswordForm): Promise<UserVerifyOTPResponse> => {
-    // // console.log("100",user_data)
-
-
-    const response = await resetPassword(user_data)
-    // // console.log("deep",response);
-    if (response.status == "failed") {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    }
-    else if (response.status == "success") {
-        // console.log("response", response)
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data,
-        }
-    } else {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data,
-        }
-    }
-
-}
-
-
-export const forget_password = async (user_data: UserForgetPassword): Promise<UserForgetPasswordResponse> => {
-    // // console.log("100",user_data)
-
-    const response = await handleForgotPass(user_data)
-    // // console.log("deep",response);
-    if (response.status == "failed") {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    }
-    else if (response.status == "success") {
-        // console.log("response", response)
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    } else {
-        return {
-            status: response.status,
-            message: response.message,
-            data: response.data
-        }
-    }
-
-}
-
-
-export const resend_user_otp = async (user_data: UserRegisterOtpData): Promise<UserSignupResponse> => {
-    return await signup_user(user_data)
 }
 

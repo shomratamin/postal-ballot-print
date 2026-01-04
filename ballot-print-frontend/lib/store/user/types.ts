@@ -128,7 +128,7 @@ export interface TempCredentials {
 
 export interface UserLoginData {
 
-  username: string;
+  phone_number: string;
   password: string;
 }
 export interface UserForgetPasswordData {

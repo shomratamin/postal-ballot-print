@@ -6,59 +6,68 @@ import { hasPermission } from "@/lib/utils/common";
 import { VerifiedUser, verify_cookies } from "@/lib/utils/verifyCookie";
 import NavBar from "@/src/components/Navbar";
 import FlowingSidebar from "@/src/components/Sidebar/SidebarResponsive/FlowingSidebar";
-import Sidebar, { SidebarItem } from "@/src/components/Sidebar/SidebarResponsive/sidebar";
+import Sidebar, {
+  SidebarItem,
+} from "@/src/components/Sidebar/SidebarResponsive/sidebar";
 import DakjontroBanner from "@/src/components/common/DakjontroBanner";
-
 
 import { redirect } from "next/navigation";
 
 const ALLOWED = [
-    "ballot-print.admin.full-permit", "ballot-print.operator.full-permit"
-]
+  "ADMIN",
+  "OPERATOR",
+];
 
 export default async function BallotDashboardLayout({
-    children,
+  children,
 }: {
-    children: React.ReactNode;
+  children: React.ReactNode;
 }) {
-    let lang: Locale = await get_lang_cookie();
-    const { common, service, printing } = await getDictionary(lang);
-    let user: VerifiedUser | null = await verify_cookies()
-    let verified = false
-    if (user) {
-        if (hasPermission(user.permissions, ALLOWED)) {
-            verified = true
-        } else {
-            // redirect(`${process.env.NEXT_PUBLIC_SELF_API_URL}/api/user/login`);
-            redirect("/login")
-        }
-    }
-
-    let menus: SidebarItem[] = []
-    if (user && user.permissions) {
-        menus = await get_menus()
+  let lang: Locale = await get_lang_cookie();
+  const { common, service, printing } = await getDictionary(lang);
+  let user: VerifiedUser | null = await verify_cookies();
+  console.log("Verified user in dashboard layout:", user);
+  let verified = false;
+  if (user) {
+    if (ALLOWED.includes(user.user_role)) {
+      verified = true
     } else {
-        menus = []
-        redirect("/login");
+      verified = false
+      redirect("/login")
     }
-    console.log("menus from dashboard", verified, menus)
+  } else {
+    redirect("/login");
+  }
 
-    return (
-        <div className="relative">
-            <NavBar />
-            <div className="flex">
-                {verified && <FlowingSidebar menus={menus} lang={lang} />}
-                <div className="flex flex-col w-full">
-                    <DakjontroBanner printingLocale={printing} />
+  let menus: SidebarItem[] = [];
+  // if (user && user.permissions) {
+  //     menus = await get_menus()
+  // } else {
+  //     menus = []
+  //     redirect("/login");
+  // }
 
+  // Load menus without verification
+  try {
+    menus = await get_menus();
+  } catch (error) {
+    console.error("Error loading menus:", error);
+    menus = [];
+  }
 
-                    <div className="ss:p-1 w-full">
-                        {children}
-                    </div>
-                </div>
-            </div>
+  console.log("menus from dashboard", verified, menus);
 
+  return (
+    <div className="relative">
+      <NavBar />
+      <div className="flex">
+        {verified && <FlowingSidebar menus={menus} lang={lang} />}
+        <div className="flex flex-col w-full">
+          <DakjontroBanner printingLocale={printing} />
 
+          <div className="ss:p-1 w-full">{children}</div>
         </div>
-    );
+      </div>
+    </div>
+  );
 }

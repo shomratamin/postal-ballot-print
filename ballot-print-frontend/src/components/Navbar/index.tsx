@@ -6,6 +6,7 @@ import LoginButton from "./LoginButton";
 import { Locale, getDictionary } from "@/dictionaries/dictionaty";
 import { VerifiedUser, verify_cookies } from "@/lib/utils/verifyCookie";
 import { get_lang_cookie, logout_user } from "@/lib/store/user/actions";
+
 import {
   Navbar,
   NavbarBrand,
@@ -19,16 +20,12 @@ import {
   Badge,
   Avatar,
 } from "@heroui/react";
-import LanguageTogglerMenu from "./LanguageTogglerMenu";
-import ThemeTogglerMenu from "./ThemeTogglerMenu";
-import LoginButtonMenu from "./LoginButtonMenu";
-import SignupButtonMenu from "./SignupButtonMenu";
-import LogoutButtonMenu from "./LogoutButtonMenu";
+
+
 // import fetchActiveCart from "@/lib/http/cart/fetchActiveCart";
 import SignupButton from "./SignupButton";
 import ServiceRoleContent from "./ServiceRoleContent";
 import HamBurgerMenu from "./HamBurgerMenu";
-import fetchUserBranch from "@/lib/http/user/fetchUserBranch";
 
 export default async function NavBar() {
   let lang: Locale = await get_lang_cookie();
@@ -45,10 +42,7 @@ export default async function NavBar() {
     console.log("Navbar menu is now:", isOpen ? "Open" : "Closed");
     return false
   };
-  const branch = await fetchUserBranch(verified?.branch_code || "")
-  console.log("branch info", branch);
-  // const active_cart = await fetchActiveCart();
-  // console.log("active_cart", active_cart);
+
 
   return (
     <>
@@ -93,7 +87,7 @@ export default async function NavBar() {
                   } ${lang == "bn" ? "xxs:text-2xl" : "xxs:text-md"} ${lang == "bn" ? "xs:text-2xl" : "xs:text-xl"
                   }  sm:text-xl md:text-2xl lg:text-2xl text-white dark:text-white`}
               >
-                {common.logo_text} {branch?.name ? `(${branch.name})` : ""}
+                {common.logo_text}
               </p>
             </Link>
           </NavbarBrand>

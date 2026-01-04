@@ -1,4 +1,4 @@
-import { PoliceStation } from './../address/types';
+
 import { PostType } from "../post/types";
 
 

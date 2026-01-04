@@ -1,8 +1,6 @@
 "use server"
 
 import { SidebarItem } from "@/src/components/Sidebar/SidebarResponsive/sidebar";
-import { MenuItem, ServiceMenu } from "./types";
-import fetchPermissionMenu from "@/lib/http/user/fetchPermissionMenu";
 
 
 interface Identifiable {
@@ -24,52 +22,68 @@ export async function arrayToObjectMap<T extends Identifiable>(array: T[]): Prom
 
 
 export const get_menus = async (): Promise<SidebarItem[]> => {
-    // Fetching menu data from API
-    const menuData = await fetchPermissionMenu();
-    console.log("Fetched Menu Data:", menuData);
-
-    // Filter to only include DMS service
-    // const dmsServices = menuData.data;
-    const dmsServices = menuData.data.filter((service: ServiceMenu) => service.service_name.toLowerCase() === "ballot print");
-
-    const sidebarItems: SidebarItem[] = dmsServices.map((service: ServiceMenu) => {
-        const sortedMenus = service.available_menus
-            .slice() // make a shallow copy to avoid mutating original
-            .sort((a: any, b: any) => (a.order || 0) - (b.order || 0));  // sort by 'order'
-        let x: SidebarItem = {
-            key: service.service_name.toLowerCase().replace(/\s+/g, "-"),
-            title: service.service_name,
-            bn_title: service.service_name, // Assuming bn_title is same as title for now
-            items: [],
-        };
-        if (sortedMenus.length > 0) {
-            x.items = sortedMenus.map((menu: MenuItem) => {
-                let _item: SidebarItem = {
-                    key: menu.internal_identifier,
-                    title: menu.name,
-                    bn_title: menu.bn_name,
-                    href: menu.href,
-                    icon: menu.icon,
-                    order: menu.order,
-                    access_level: menu.access_level,
+    // Hardcoded ballot print menu data - not fetching from API
+    const sidebarItems: SidebarItem[] = [
+        {
+            key: "ballot-print",
+            title: "Ballot Print",
+            bn_title: "ব্যালট প্রিন্ট",
+            items: [
+                {
+                    key: "dashboard",
+                    title: "admin Dashboard",
+                    bn_title: "এডমিন ড্যাশবোর্ড",
+                    href: "/dashboard",
+                    icon: "solar:widget-2-line-duotone",
+                    order: 1,
                     items: []
+                },
+                {
+                    key: "ballot-print",
+                    title: "Ballot Print",
+                    bn_title: "ব্যালট প্রিন্ট",
+                    href: "/ballot_print",
+                    icon: "solar:printer-line-duotone",
+                    order: 2,
+                    items: [
+                        {
+                            key: "envelope",
+                            title: "Envelope",
+                            bn_title: "এনভেলপ",
+                            href: "/ballot_print/envelope",
+                            icon: "solar:letter-line-duotone",
+                            items: []
+                        },
+                        {
+                            key: "batch-list",
+                            title: "Batch List",
+                            bn_title: "ব্যাচ তালিকা",
+                            href: "/ballot_print/batch_list",
+                            icon: "solar:list-line-duotone",
+                            items: []
+                        },
+                        {
+                            key: "printed-list",
+                            title: "Printed List",
+                            bn_title: "মুদ্রিত তালিকা",
+                            href: "/ballot_print/printed_list",
+                            icon: "solar:checklist-line-duotone",
+                            items: []
+                        },
+                        {
+                            key: "ballot-reprint",
+                            title: "Ballot RePrint",
+                            bn_title: "ব্যালট পুনঃমুদ্রণ",
+                            href: "/ballot_print/ballot_reprint",
+                            icon: "solar:printer-minimalistic-line-duotone",
+                            items: []
+                        }
+                    ]
                 }
-                if (menu.sub_menus && menu.sub_menus.length > 0) {
-                    _item.items = menu.sub_menus.map((submenu: MenuItem) => ({
-                        key: submenu.internal_identifier,
-                        title: submenu.name,
-                        bn_title: submenu.bn_name,
-                        href: submenu.href || "#",
-                        icon: submenu.icon || "solar:menu-dots-line-duotone",
-                    }));
-                }
-                return _item
-            });
-
+            ]
         }
+    ];
 
-        return x;
-    });
-
+    console.log("Returning hardcoded ballot print menu");
     return sidebarItems;
 };

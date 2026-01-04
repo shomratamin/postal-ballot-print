@@ -3,9 +3,9 @@ import { MetadataRoute } from 'next';
 
 export default function manifest(): MetadataRoute.Manifest {
     return {
-        name: 'DMS Counter',
-        short_name: 'DMS Counter',
-        description: 'Postal Service Counter Application',
+        name: 'Postal Envelope Print',
+        short_name: 'Postal Envelope Print',
+        description: 'Postal Service Envelope Printing Application',
         start_url: '/',
         scope: '/',
         display: 'standalone',
@@ -21,6 +21,6 @@ export default function manifest(): MetadataRoute.Manifest {
             { src: '/maskable_icon_x192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
             { src: '/maskable_icon_x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
-        categories: ['productivity', 'utilities'],
+        categories: ['printing', 'utilities'],
     };
 }

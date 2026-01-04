@@ -30,7 +30,7 @@ export interface WeightMachineContextType {
     weightDimData: WeightDimResponse | null;
     isLoading: boolean;
     error: string | null;
-    checkConnection: () => Promise<void>;
+    // checkConnection: () => Promise<void>;
     getWeightDimData: () => Promise<void>;
     showBanner: boolean;
     setShowBanner: (show: boolean) => void;

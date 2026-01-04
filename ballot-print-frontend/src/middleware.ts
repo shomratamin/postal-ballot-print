@@ -78,7 +78,7 @@ export async function middleware(request: NextRequest) {
 
 
 function tokenless_route(path_name: string): boolean {
-    let allowed_without_token: string[] = ["", "login", "signup", "register", "otp", "forgot_password", "change_password_otp", "admin", "mashul", "print_label"]
+    let allowed_without_token: string[] = ["", "login", "signup", "register", "otp", "forgot_password", "change_password_otp", "admin", "mashul", "print_label", "dashboard"]
     return allowed_without_token.some((allowedPath) => path_name.includes(allowedPath));
 }
 
