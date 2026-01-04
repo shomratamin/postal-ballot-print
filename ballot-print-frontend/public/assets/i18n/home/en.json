@@ -1,0 +1,8 @@
+{
+    "service": "Post Service",
+    "ecommerce": "E-commerce",
+    "merchant": "Merchant",
+    "pickup": "Pickup",
+    "admin": "Admin",
+    "panel": "Panel"
+}

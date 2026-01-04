@@ -1,0 +1,11 @@
+{
+    "recipient_name": "Recipient Name",
+    "recipient_title": "Recipient Title",
+    "recipient_country": "Recipient Country",
+    "recipient_district": "Recipient District",
+    "recipient_Upazila": "Recipient Upazila",
+    "recipient_zone": "Recipient Zone",
+    "recipient_address": "Recipient Address (Maximum 200 letters)",
+    "recipient_mobile": "Recipient Mobile",
+    "recipient_prev_address": "Previously used addresses"
+}

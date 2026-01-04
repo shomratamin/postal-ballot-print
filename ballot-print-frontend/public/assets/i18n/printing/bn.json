@@ -1,0 +1,12 @@
+{
+    "printing": "প্রিন্টিং",
+    "A4_Envelope": "A4 খাম",
+    "C5_Envelope": "C5 খাম",
+    "C4_Envelope": "C4 খাম",
+    "DL_Envelope": "DL খাম",
+    "submit_type": "পাঠানোর ধরণ",
+    "self_post": "নিজে পাঠান",
+    "pickup_post": "পিক আপ",
+    "delivery_instruction": "ডেলিভারীর নির্দেশনা",
+    "delivery_instruction_placeholder": "ডেলিভারীর নির্দেশনা লিখুন"
+}

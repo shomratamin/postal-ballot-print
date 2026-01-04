@@ -1,0 +1,19 @@
+{
+    "title": "Post Office",
+    "subtitle": "General Customer Login",
+    "admin_subtitle": "Admin Login",
+    "mobile": "Mobile",
+    "password": "Password",
+    "confirm_password": "Confirm Password",
+    "placeholder_mobile": "Please enter your mobile number",
+    "placeholder_password": "Please enter your password",
+    "login_label": "Login",
+    "no_account_prompt": "Don't have an account?",
+    "registration_prompt": "Register",
+    "ok": "Okay",
+    "otp": "OTP",
+    "send": "Send",
+    "again": "Again",
+    "send_otp":"Send OTP",
+    "forgot_your_password": "Forgot your password?"
+}

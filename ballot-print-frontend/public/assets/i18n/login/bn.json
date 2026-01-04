@@ -1,0 +1,19 @@
+{
+    "title": "ডাক অধিদপ্তর",
+    "subtitle": "সাধারণ গ্রাহক লগইন",
+    "admin_subtitle": "অ্যাডমিন লগইন",
+    "mobile": "মোবাইল",
+    "password": "পাসওয়ার্ড",
+    "confirm_password": "পাসওয়ার্ডটি নিশ্চিত করুন",
+    "placeholder_mobile": "আপনার মোবাইল নাম্বারটি লিখুন",
+    "placeholder_password": "আপনার পাসওয়ার্ডটি লিখুন",
+    "login_label": "লগইন",
+    "no_account_prompt": "অ্যাকাউন্ট নেই?",
+    "registration_prompt": "রেজিষ্ট্রেশন করুন",
+    "otp": "গোপন কোড",
+    "send": "পাঠান",
+    "again": "পুনরায়",
+    "send_otp":"গোপন কোড পাঠান",
+    "ok": "নিশ্চিত করুণ",
+    "forgot_your_password": "পাসওয়ার্ড ভুলে গেছেন?"
+}

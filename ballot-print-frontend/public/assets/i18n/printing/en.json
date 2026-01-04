@@ -1,0 +1,13 @@
+{
+    "printing": "Printing",
+    "envelope": "Envelope",
+    "A4_Envelope": "A4 Envelope",
+    "C5_Envelope": "C5 Envelope",
+    "C4_Envelope": "C4 Envelope",
+    "DL_Envelope": "DL Envelope",
+    "submit_type": "Submit Post",
+    "self_post": "Self Post",
+    "pickup_post": "Pickup Post",
+    "delivery_instruction": "Delivery Instructions",
+    "delivery_instruction_placeholder": "Please Write your delivery instructions"
+}

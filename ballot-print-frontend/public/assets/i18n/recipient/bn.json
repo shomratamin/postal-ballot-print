@@ -1,0 +1,11 @@
+{
+    "recipient_name": "প্রাপকের নাম",
+    "recipient_title": "প্রাপকের পদবী",
+    "recipient_country": "প্রাপকের দেশ",
+    "recipient_district": "প্রাপকের জেলা",
+    "recipient_Upazila": "প্রাপকের উপজেলা",
+    "recipient_zone": "প্রাপকের জোন",
+    "recipient_address": "প্রাপকের ঠিকানা (সর্বোচ্চ ২০০ অক্ষর)",
+    "recipient_mobile": "প্রাপকের মোবাইল নম্বর",
+    "recipient_prev_address": "পূর্বে ব্যবহারকৃত ঠিকানাসমূহ"
+}

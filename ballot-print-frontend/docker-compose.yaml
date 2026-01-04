@@ -1,0 +1,6 @@
+services:
+  ballot-print-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ballot-print-frontend
