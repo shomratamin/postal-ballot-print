@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	printclient "printenvelope/controllers/print-client"
 	"printenvelope/database"
 	"printenvelope/logger"
 	"printenvelope/middleware"
@@ -51,6 +52,11 @@ func main() {
 	// Use new consolidated routes
 	routes.SetupRoutes(app, db)
 
+	// Initialize Print Client Service (WebSocket for cloud print clients)
+	printClientService := printclient.InitPrintClientService()
+	printClientService.Start()
+	logger.Success("Print Client Service started successfully")
+
 	// Initialize Kafka consumer service
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")} // e.g., "localhost:9092"
 	if kafkaBrokers[0] == "" {
@@ -90,6 +96,10 @@ func main() {
 	// Graceful shutdown
 	if err := consumerService.Shutdown(); err != nil {
 		logger.Error("Error during consumer shutdown", err)
+	}
+	if printClientService != nil {
+		printClientService.Stop()
+		logger.Success("Print Client Service stopped")
 	}
 	if err := app.Shutdown(); err != nil {
 		logger.Error("Error during Fiber server shutdown", err)
