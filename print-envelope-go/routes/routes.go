@@ -6,11 +6,13 @@ import (
 	"printenvelope/controllers/auth"
 	"printenvelope/controllers/order"
 	"printenvelope/controllers/print"
+	printclient "printenvelope/controllers/print-client"
 	"printenvelope/logger"
 	"printenvelope/middleware"
 
 	//"printenvelope/middleware"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/websocket/v2"
 	"gorm.io/gorm"
 )
 
@@ -21,6 +23,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	authController := auth.NewAuthController(db, asyncLogger)
 	orderController := order.NewOrderController(db, asyncLogger)
 	printController := print.NewPrintController(db, asyncLogger)
+	printClientController := printclient.NewPrintClientController(printclient.GetService())
 	// kafkaController := product.NewKafkaController(db, asyncLogger)
 	// cloudPrintController := product.NewCloudPrintController(db, asyncLogger)
 	// userController := user.NewUserController(db, asyncLogger)
@@ -32,6 +35,9 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 			"title": "Home",
 		})
 	})
+
+	// WebSocket route for print clients
+	app.Get("/ws", websocket.New(printclient.ConnectWS))
 
 	/*=============================================================================
 	| Public Routes
@@ -66,5 +72,19 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	printGroup.Post("/print-batch", middleware.RequirePermissions(
 		constants.PermOperatorFull,
 	), printController.PrintBatch)
+
+	// Print Client routes (for managing connected printers)
+	printClientGroup := api.Group("/print-client")
+	printClientGroup.Get("/metrics", printClientController.GetMetrics)
+	printClientGroup.Post("/send-job", middleware.RequirePermissions(
+		constants.PermOperatorFull,
+	), printClientController.SendPrintJob)
+	printClientGroup.Get("/connected-printers", middleware.RequirePermissions(
+		constants.PermAdminFull,
+		constants.PermOperatorFull,
+	), printClientController.GetConnectedPrinters)
+	printClientGroup.Delete("/disconnect/:printer_id", middleware.RequirePermissions(
+		constants.PermAdminFull,
+	), printClientController.DisconnectPrinter)
 
 }
