@@ -42,7 +42,7 @@ func NewAppSettings() *AppSettings {
 		LIVE_PDf_URL:      "https://ekdak.com/print/generate-mashul/",
 		SPECIMEN_PDF_URL:  "https://ekdak.com/print/generate-specimen-mashul/",
 		INTERNAL_PDF_URL:  "https://ekdak.com/print/generate-internal-mashul/",
-		SOCKET_URL:        "wss://ekdak.com/ekdak-cloud-print-subscriber",
+		SOCKET_URL:        "wss://election2026.ekdak.com/v1/ws",
 		WT_DIM_MACHINE_ID: "",
 		CAMERA_ID:         "",
 		// Auto-update settings with defaults
