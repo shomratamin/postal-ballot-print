@@ -1,5 +1,5 @@
 package main
 
 func getVersion() string {
-	return "1.0.1.6"
+	return "1.0.1.6-envelope"
 }
