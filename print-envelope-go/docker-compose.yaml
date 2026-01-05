@@ -1,6 +1,6 @@
 services:
-  bpo-accounting:
+  envelope-printer:
     build:
       context: .
       dockerfile: ./Dockerfile
-    container_name: bpo-accounting
+    container_name: envelope-printer

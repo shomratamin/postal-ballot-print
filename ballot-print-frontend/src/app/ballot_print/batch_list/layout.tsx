@@ -15,7 +15,7 @@ import { redirect } from "next/navigation";
 
 const ALLOWED = [
   "ADMIN",
-  "OPERATOR",
+  "OPERATOR", "SUPER_ADMIN"
 ];
 
 export default async function BallotDashboardLayout({

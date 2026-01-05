@@ -2,6 +2,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
     reactStrictMode: true,
+    output: 'standalone',
     // If you serve images/APIs from other origins, add them here for caching
     images: { remotePatterns: [{ protocol: 'https', hostname: '**' }] },
 };

@@ -73,6 +73,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 		constants.PermOperatorFull,
 	), printController.PrintBatch)
 
+	printGroup.Post("/print-envelope", middleware.RequirePermissions(
+		constants.PermOperatorFull,
+	), printController.PrintEnvelope)
+
 	// Print Client routes (for managing connected printers)
 	printClientGroup := api.Group("/print-client")
 	printClientGroup.Get("/metrics", printClientController.GetMetrics)

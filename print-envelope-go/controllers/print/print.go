@@ -1,7 +1,12 @@
 package print
 
 import (
+	"bytes"
 	"fmt"
+	"log"
+	"strconv"
+	"strings"
+
 	"printenvelope/logger"
 	"printenvelope/models/order"
 	"printenvelope/models/print"
@@ -9,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/signintech/gopdf"
+
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -282,4 +289,320 @@ func (pc *PrintController) PrintBatch(c *fiber.Ctx) error {
 			"total_print_jobs": len(printSingleJobs),
 		},
 	})
+}
+
+func (pc *PrintController) PrintEnvelope(c *fiber.Ctx) error {
+	var internalJob types.InternalJob
+	if err := c.BodyParser(&internalJob); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input data"})
+	}
+
+	// var (
+	// 	pageWidth  = internalJob.InternalJobData.PrintWidthInch * 72.0  // Convert inches to points (1 inch = 72 points)
+	// 	pageHeight = internalJob.InternalJobData.PrintHeightInch * 72.0 // Convert inches to points (1 inch = 72 points)
+	// )
+
+	pageWidth := 8.5 * 72.0
+	pageHeight := 7.75 * 72.0
+
+	pdf := gopdf.GoPdf{}
+	pdf.Start(gopdf.Config{PageSize: gopdf.Rect{W: pageWidth, H: pageHeight}})
+	pdf.AddPage()
+
+	// Load font
+	if err := pdf.AddTTFFont("english", "fonts/roboto_mono.ttf"); err != nil {
+		log.Println("Failed to load english font:", err)
+	}
+	if err := pdf.SetFont("english", "", 26); err != nil {
+		log.Println("Failed to set font:", err)
+	}
+
+	// Load background image
+	imgHolder, err := gopdf.ImageHolderByPath("assets/Outbound-v-4.png")
+	if err != nil {
+		log.Println("Failed to load background image:", err)
+	}
+
+	// Draw background image
+	imgX := 0.0
+	imgY := 0.0
+	imgW := 612.0
+	imgH := 558.0
+	if err == nil {
+		pdf.ImageByHolder(imgHolder, imgX, imgY, &gopdf.Rect{W: imgW, H: imgH})
+	}
+
+	// Heading
+	// heading := "BANGLADESH POST OFFICE"
+	// // if err := pdf.SetFont("english-bold", "", 24); err != nil {
+	// // 	log.Println("Failed to set bold font:", err)
+	// // }
+	// headingWidth, _ := pdf.MeasureTextWidth(heading)
+	// headingX := (pageWidth - headingWidth) / 2
+	// pdf.SetX(headingX)
+	// pdf.SetY(30)
+	// if err := pdf.CellWithOption(&gopdf.Rect{W: headingWidth, H: 30}, heading, gopdf.CellOption{Align: gopdf.Left}); err != nil {
+	// 	log.Println("Failed to draw text:", err)
+	// }
+
+	// Barcode logic
+	// var textY float64
+	// if internalJob.InternalJobData.Barcode != "" {
+	// 	bar, err := code128.Encode(internalJob.InternalJobData.Barcode)
+	// 	if err != nil {
+	// 		log.Println("Barcode encoding failed:", err)
+	// 		return c.Status(500).JSON(fiber.Map{"error": "Failed to encode barcode"})
+	// 	}
+	// 	scaledBar, err := barcode.Scale(bar, 500, 50)
+	// 	if err != nil {
+	// 		log.Println("Barcode scaling failed:", err)
+	// 		return c.Status(500).JSON(fiber.Map{"error": "Failed to scale barcode"})
+	// 	}
+
+	// 	rgba := image.NewRGBA(scaledBar.Bounds())
+	// 	for y := scaledBar.Bounds().Min.Y; y < scaledBar.Bounds().Max.Y; y++ {
+	// 		for x := scaledBar.Bounds().Min.X; x < scaledBar.Bounds().Max.X; x++ {
+	// 			rgba.Set(x, y, scaledBar.At(x, y))
+	// 		}
+	// 	}
+
+	// 	var imgBuf bytes.Buffer
+	// 	if err := png.Encode(&imgBuf, rgba); err != nil {
+	// 		log.Println("Failed to encode PNG:", err)
+	// 		return c.Status(500).JSON(fiber.Map{"error": "Failed to encode barcode image"})
+	// 	}
+
+	// 	holder, err := gopdf.ImageHolderByBytes(imgBuf.Bytes())
+	// 	if err != nil {
+	// 		log.Println("Failed to create image holder:", err)
+	// 		return c.Status(500).JSON(fiber.Map{"error": "Invalid barcode image"})
+	// 	}
+
+	// 	imgW := 550.0
+	// 	imgH := 70.0
+	// 	imgX := (pageWidth - imgW) / 2
+	// 	imgY := 90.0
+
+	// 	if err := pdf.ImageByHolder(holder, imgX, imgY, &gopdf.Rect{W: imgW, H: imgH}); err != nil {
+	// 		log.Println("Image draw failed:", err)
+	// 	}
+
+	// 	if err := pdf.SetFont("english", "", 36); err != nil {
+	// 		log.Println("Failed to set font for barcode text:", err)
+	// 	}
+
+	// 	text := internalJob.InternalJobData.Barcode
+	// 	textWidth, _ := pdf.MeasureTextWidth(text)
+	// 	textX := (pageWidth - textWidth) / 2
+	// 	textY = imgY + imgH
+
+	// 	pdf.SetX(textX)
+	// 	pdf.SetY(textY)
+	// 	pdf.Cell(nil, text)
+	// }
+
+	// Layout vars
+	// y := textY + 50
+	// x := 35.0
+	// lineHeight := 30.0
+	// fontSize := 24.0
+	// maxTextWidth := pageWidth - x*2
+
+	// // pdf.SetFont("english", "", fontSize)
+
+	// // Draw content
+	// // Set font size for recipient
+	// if err := pdf.SetFont("english", "", fontSize); err != nil {
+	// 	log.Println("Failed to set font:", err)
+	// }
+	// recipient := fmt.Sprintf("Recipient: %s (%s), %s, %s",
+	// 	internalJob.InternalJobData.RecipientName,
+	// 	internalJob.InternalJobData.RecipientPhone,
+	// 	internalJob.InternalJobData.RecipientAddress,
+	// 	internalJob.InternalJobData.RecipientDistrict,
+	// )
+	// y = drawPrintInternalWrappedText(&pdf, recipient, x, y, maxTextWidth, lineHeight, "english", fontSize)
+	// y += 20 // Add extra space after recipient
+
+	// // Set font size for sender
+	// if err := pdf.SetFont("english", "", fontSize); err != nil {
+	// 	log.Println("Failed to set font:", err)
+	// }
+	// sender := fmt.Sprintf("Sender: %s (%s), %s, %s",
+	// 	internalJob.InternalJobData.SenderName,
+	// 	internalJob.InternalJobData.SenderPhone,
+	// 	internalJob.InternalJobData.SenderAddress,
+	// 	internalJob.InternalJobData.SenderDistrict,
+	// )
+	// y = drawPrintInternalWrappedText(&pdf, sender, x, y, maxTextWidth, lineHeight, "english", fontSize)
+	// y += 10 // Add extra space after sender
+
+	// weight, _ := strconv.ParseFloat(internalJob.InternalJobData.Weight, 64)
+	// mashul, _ := strconv.ParseFloat(internalJob.InternalJobData.Mashul, 64)
+
+	// formatedAdditionalItems := FormatAdditionalItems(
+	// 	internalJob.InternalJobData.AdditionalServiceText,
+	// 	weight,
+	// 	mashul,
+	// )
+
+	// for _, line := range formatedAdditionalItems {
+	// 	y = drawPrintInternalWrappedText(&pdf, line, x, y, maxTextWidth, lineHeight, "english", 18.0)
+	// }
+
+	// registryText := strings.ToUpper(internalJob.InternalJobData.AdditionalServiceText)
+	// _ = drawPrintInternalWrappedText(&pdf, registryText, x, y, maxTextWidth, lineHeight, "english", fontSize)
+
+	// Output PDF
+	var pdfBuf bytes.Buffer
+	if err := pdf.Write(&pdfBuf); err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to generate PDF")
+	}
+
+	// tempFile := "simple_output.pdf"
+	// err = os.WriteFile(tempFile, pdfBuf.Bytes(), 0644)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to save PDF file: %w", err)
+	// }
+
+	// absPath, _ := filepath.Abs(tempFile)
+
+	// // 3. Print using PowerShell
+	// cmd := exec.Command("powershell", "-Command", fmt.Sprintf(`
+	// 	$shell = New-Object -ComObject Shell.Application
+	// 	$shell.ShellExecute("%s", "", "", "printto", "%s")
+	// `, absPath, "TSC TX300"))
+
+	// err = cmd.Run()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to print file: %w", err)
+	// }
+
+	c.Set("Content-Type", "application/pdf")
+	c.Set("Content-Disposition", "inline; filename=label.pdf")
+	return c.Send(pdfBuf.Bytes())
+}
+
+func drawPrintInternalWrappedText(pdf *gopdf.GoPdf, text string, x, y, maxWidth, lineHeight float64, font string, size float64) float64 {
+
+	if err := pdf.SetFont(font, "", size); err != nil {
+		log.Println("Failed to set font in wrapped text:", err)
+	}
+	words := bytes.Fields([]byte(text)) // ensures clean whitespace
+	line := ""
+
+	for _, word := range words {
+		testLine := line
+		if testLine != "" {
+			testLine += " "
+		}
+		testLine += string(word)
+
+		width, _ := pdf.MeasureTextWidth(testLine)
+		if width > maxWidth {
+			// Draw current line
+			pdf.SetX(x)
+			pdf.SetY(y)
+			pdf.Cell(nil, line)
+			y += lineHeight
+			line = string(word)
+		} else {
+			line = testLine
+		}
+	}
+
+	if line != "" {
+		pdf.SetX(x)
+		pdf.SetY(y)
+		pdf.Cell(nil, line)
+		y += lineHeight
+	}
+
+	return y
+}
+
+func FormatAdditionalItems(text string, jobWeight float64, jobMashul float64) []string {
+	if text == "" {
+		return []string{}
+	}
+
+	var formattedItems []string
+	items := strings.Split(text, ",")
+
+	for _, item := range items {
+		formattedItems = append(formattedItems, formatServiceItem(item))
+	}
+
+	// Group into lines of 2 items per line
+	var lines []string
+	for i := 0; i < len(formattedItems); i += 2 {
+		end := i + 2
+		if end > len(formattedItems) {
+			end = len(formattedItems)
+		}
+		lines = append(lines, strings.Join(formattedItems[i:end], ", "))
+	}
+
+	// Add weight and mashul at the end
+	weightLine := fmt.Sprintf("Weight: %s gm, Mashul: %s tk", formatNumber(jobWeight), formatNumber(jobMashul))
+	lines = append(lines, weightLine)
+
+	return lines
+}
+
+func formatServiceItem(item string) string {
+	item = strings.TrimSpace(item)
+	switch {
+	case item == "registry":
+		return "Registry"
+	case item == "ad_pod":
+		return "AD_POD"
+	case strings.HasPrefix(item, "insurance:"):
+		val := strings.TrimPrefix(item, "insurance:")
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return fmt.Sprintf("INSURANCE: %s", val)
+		}
+		return fmt.Sprintf("INSURANCE: %s", formatNumber(f))
+	case strings.HasPrefix(item, "vp:"):
+		val := strings.TrimPrefix(item, "vp:")
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return fmt.Sprintf("VP: %s", val)
+		}
+		return fmt.Sprintf("VP: %s", formatNumber(f))
+	case item == "postal_service":
+		return "Postal Service"
+	case item == "blind_literature":
+		return "Blind Literature"
+	default:
+		return item // fallback
+	}
+}
+
+func formatNumber(input float64) string {
+	return commaSeparated(input)
+}
+
+func commaSeparated(f float64) string {
+	s := fmt.Sprintf("%.2f", f)
+	intPart, fracPart := s[:len(s)-3], s[len(s)-3:]
+	n := len(intPart)
+	if n <= 3 {
+		return intPart + fracPart
+	}
+	var b strings.Builder
+	pre := n % 3
+	if pre > 0 {
+		b.WriteString(intPart[:pre])
+		b.WriteString(",")
+	}
+	for i := pre; i < n; i += 3 {
+		b.WriteString(intPart[i : i+3])
+		if i+3 < n {
+			b.WriteString(",")
+		}
+	}
+	b.WriteString(fracPart)
+	return b.String()
 }

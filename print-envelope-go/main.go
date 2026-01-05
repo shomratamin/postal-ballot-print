@@ -58,16 +58,25 @@ func main() {
 	logger.Success("Print Client Service started successfully")
 
 	// Initialize Kafka consumer service
-	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")} // e.g., "localhost:9092"
-	if kafkaBrokers[0] == "" {
-		kafkaBrokers = []string{"localhost:9092"} // default fallback
+	kafkaHost := os.Getenv("KAFKA_HOST")
+	if kafkaHost == "" {
+		kafkaHost = "localhost:9092" // default fallback
 	}
+	kafkaBrokers := []string{kafkaHost}
+
 	kafkaTopic := os.Getenv("KAFKA_TOPIC")
 	if kafkaTopic == "" {
 		kafkaTopic = "ballot_orders" // default fallback
 	}
 
-	consumerService := services.NewConsumerService(db, kafkaBrokers, kafkaTopic)
+	kafkaUser := os.Getenv("KAFKA_USER")
+	kafkaPass := os.Getenv("KAFKA_PASS")
+	kafkaGroup := os.Getenv("KAFKA_GROUP")
+	if kafkaGroup == "" {
+		kafkaGroup = "default-consumer-group" // default fallback
+	}
+
+	consumerService := services.NewConsumerService(db, kafkaBrokers, kafkaTopic, kafkaUser, kafkaPass, kafkaGroup)
 	if err := consumerService.Start(); err != nil {
 		logger.Error("Failed to start consumer service", err)
 		fmt.Printf("Failed to start consumer service: %s\n", err.Error())

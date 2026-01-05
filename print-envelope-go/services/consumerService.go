@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	logModel "printenvelope/models/log"
 	"printenvelope/models/order"
@@ -20,6 +21,9 @@ type ConsumerService struct {
 	db                *gorm.DB
 	brokers           []string
 	topic             string
+	username          string
+	password          string
+	group             string
 	consumer          sarama.Consumer
 	partitionConsumer sarama.PartitionConsumer
 	orderCount        int
@@ -28,11 +32,14 @@ type ConsumerService struct {
 }
 
 // NewConsumerService creates a new consumer service instance
-func NewConsumerService(db *gorm.DB, brokers []string, topic string) *ConsumerService {
+func NewConsumerService(db *gorm.DB, brokers []string, topic, username, password, group string) *ConsumerService {
 	return &ConsumerService{
 		db:       db,
 		brokers:  brokers,
 		topic:    topic,
+		username: username,
+		password: password,
+		group:    group,
 		sigChan:  make(chan os.Signal, 1),
 		doneChan: make(chan struct{}),
 	}
@@ -42,6 +49,36 @@ func NewConsumerService(db *gorm.DB, brokers []string, topic string) *ConsumerSe
 func (cs *ConsumerService) ConnectConsumer() error {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
+
+	// Increase timeouts for OCI Streams
+	config.Net.DialTimeout = 30 * time.Second
+	config.Net.ReadTimeout = 30 * time.Second
+	config.Net.WriteTimeout = 30 * time.Second
+
+	// Configure SASL authentication if credentials are provided
+	if cs.username != "" && cs.password != "" {
+		log.Printf("Connecting to Kafka with username: %s", cs.username)
+		log.Printf("Password: %s", cs.password)
+		log.Printf("Broker: %v", cs.brokers)
+
+		config.Net.SASL.Enable = true
+		config.Net.SASL.User = cs.username
+		config.Net.SASL.Password = cs.password
+		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+		config.Net.SASL.Handshake = true // Must be true for OCI Streams
+
+		// Enable TLS for SASL_SSL (required for OCI Streams)
+		config.Net.TLS.Enable = true
+	}
+
+	// OCI Streams supports Kafka 2.3.1 or higher
+	config.Version = sarama.V2_3_0_0
+
+	// Disable ApiVersionsRequest to avoid timing issues with SASL
+	config.ApiVersionsRequest = false
+
+	// Enable verbose logging for debugging
+	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
 
 	consumer, err := sarama.NewConsumer(cs.brokers, config)
 	if err != nil {
