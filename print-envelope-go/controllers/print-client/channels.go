@@ -2,6 +2,7 @@ package printclient
 
 import (
 	"log"
+	"printenvelope/types"
 	"sync"
 	"time"
 )
@@ -21,7 +22,7 @@ var (
 	broadcastChan        = make(chan BroadcastMsg, 10000)   // Broadcast messages
 	internalMsgChan      = make(chan ChannelMsg, 10000)     // Internal messages (replaces RabbitMQ)
 	upstreamLogsChan     = make(chan UpstreamMsg, 10000)    // Upstream log messages
-	printJobChan         = make(chan PrintJob, 10000)       // Print job queue
+	printJobChan         = make(chan types.PrintJob, 10000) // Print job queue
 	channelSubscriptions sync.Map                           // Map to store channel subscriptions
 )
 
@@ -234,7 +235,7 @@ func PushNotification(channel, userUUID, message string) {
 }
 
 // PublishPrintJob publishes a print job to the job channel
-func PublishPrintJob(job PrintJob) {
+func PublishPrintJob(job types.PrintJob) {
 	printJobChan <- job
 }
 
@@ -277,6 +278,6 @@ func GetUpstreamLogsChannel() chan UpstreamMsg {
 }
 
 // GetPrintJobChannel returns the print job channel for external use
-func GetPrintJobChannel() chan PrintJob {
+func GetPrintJobChannel() chan types.PrintJob {
 	return printJobChan
 }

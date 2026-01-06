@@ -60,6 +60,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 
 	order := api.Group("/order")
 	order.Get("/order-list", middleware.RequirePermissions(
+		constants.PermSuperAdminFull,
 		constants.PermAdminFull,
 		constants.PermOperatorFull,
 	), orderController.OrderList)
@@ -80,15 +81,15 @@ func SetupRoutes(app *fiber.App, db *gorm.DB) {
 	// Print Client routes (for managing connected printers)
 	printClientGroup := api.Group("/print-client")
 	printClientGroup.Get("/metrics", printClientController.GetMetrics)
-	printClientGroup.Post("/send-job", middleware.RequirePermissions(
-		constants.PermOperatorFull,
-	), printClientController.SendPrintJob)
+	// printClientGroup.Post("/send-job", middleware.RequirePermissions(
+	// 	constants.PermOperatorFull,
+	// ), printClientController.SendPrintJob)
 	printClientGroup.Get("/connected-printers", middleware.RequirePermissions(
 		constants.PermAdminFull,
 		constants.PermOperatorFull,
 	), printClientController.GetConnectedPrinters)
-	printClientGroup.Delete("/disconnect/:printer_id", middleware.RequirePermissions(
-		constants.PermAdminFull,
-	), printClientController.DisconnectPrinter)
+	// printClientGroup.Delete("/disconnect/:printer_id", middleware.RequirePermissions(
+	// 	constants.PermAdminFull,
+	// ), printClientController.DisconnectPrinter)
 
 }

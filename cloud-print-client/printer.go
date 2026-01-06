@@ -111,9 +111,9 @@ func getAllPhysicalPrinters(console *Console) ([]PrinterStatus, error) {
 				Text:  fmt.Sprintf("Printer: %s, Status: %s", p.Name, statusText),
 				Color: colorNRGBA(0, 255, 0, 255), // Green
 			}
-			if strings.HasPrefix(p.PortName, "USB") || strings.HasPrefix(p.PortName, "LPT") || strings.HasPrefix(p.Name, "RICOH") {
-				availablePrinters = append(availablePrinters, printerStatus)
-			}
+			// if strings.HasPrefix(p.PortName, "USB") || strings.HasPrefix(p.PortName, "LPT") || strings.HasPrefix(p.Name, "RICOH") {
+			availablePrinters = append(availablePrinters, printerStatus)
+			// }
 		}
 	}
 

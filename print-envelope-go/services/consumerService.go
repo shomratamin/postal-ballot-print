@@ -58,24 +58,23 @@ func (cs *ConsumerService) ConnectConsumer() error {
 	// Configure SASL authentication if credentials are provided
 	if cs.username != "" && cs.password != "" {
 		log.Printf("Connecting to Kafka with username: %s", cs.username)
-		log.Printf("Password: %s", cs.password)
 		log.Printf("Broker: %v", cs.brokers)
 
 		config.Net.SASL.Enable = true
 		config.Net.SASL.User = cs.username
 		config.Net.SASL.Password = cs.password
 		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
-		config.Net.SASL.Handshake = true // Must be true for OCI Streams
+		config.Net.SASL.Handshake = true
 
 		// Enable TLS for SASL_SSL (required for OCI Streams)
 		config.Net.TLS.Enable = true
+
+		// IMPORTANT: Set SASL version to V1 for OCI Streams compatibility
+		config.Net.SASL.Version = sarama.SASLHandshakeV1
 	}
 
 	// OCI Streams supports Kafka 2.3.1 or higher
 	config.Version = sarama.V2_3_0_0
-
-	// Disable ApiVersionsRequest to avoid timing issues with SASL
-	config.ApiVersionsRequest = false
 
 	// Enable verbose logging for debugging
 	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
@@ -111,6 +110,97 @@ func (cs *ConsumerService) Start() error {
 	go cs.consumeMessages()
 
 	return nil
+}
+
+// cleanJSONMessage removes literal newlines within string values and fixes common JSON issues
+func cleanJSONMessage(data []byte) []byte {
+	str := string(data)
+
+	// Step 1: Remove literal newlines that appear within quoted strings
+	result := ""
+	inString := false
+	escapeNext := false
+
+	for i := 0; i < len(str); i++ {
+		char := str[i]
+
+		// Handle escape sequences
+		if escapeNext {
+			result += string(char)
+			escapeNext = false
+			continue
+		}
+
+		if char == '\\' {
+			result += string(char)
+			escapeNext = true
+			continue
+		}
+
+		// Track if we're inside a string
+		if char == '"' {
+			inString = !inString
+			result += string(char)
+			continue
+		}
+
+		// Replace newlines and carriage returns inside strings with spaces
+		if inString && (char == '\n' || char == '\r') {
+			// Skip this character (remove it)
+			continue
+		}
+
+		result += string(char)
+	}
+
+	// Step 2: Remove trailing commas before } or ]
+	// Match pattern: comma followed by optional whitespace and then } or ]
+	cleaned := ""
+	inString = false
+	escapeNext = false
+
+	for i := 0; i < len(result); i++ {
+		char := result[i]
+
+		// Handle escape sequences
+		if escapeNext {
+			cleaned += string(char)
+			escapeNext = false
+			continue
+		}
+
+		if char == '\\' {
+			cleaned += string(char)
+			escapeNext = true
+			continue
+		}
+
+		// Track if we're inside a string
+		if char == '"' {
+			inString = !inString
+			cleaned += string(char)
+			continue
+		}
+
+		// If we find a comma outside a string, check if it's a trailing comma
+		if !inString && char == ',' {
+			// Look ahead to see if there's only whitespace before } or ]
+			j := i + 1
+			for j < len(result) && (result[j] == ' ' || result[j] == '\t' || result[j] == '\n' || result[j] == '\r') {
+				j++
+			}
+
+			// If the next non-whitespace character is } or ], skip this comma
+			if j < len(result) && (result[j] == '}' || result[j] == ']') {
+				// Skip the trailing comma
+				continue
+			}
+		}
+
+		cleaned += string(char)
+	}
+
+	return []byte(cleaned)
 }
 
 // consumeMessages handles the message consumption loop
@@ -157,10 +247,14 @@ func (cs *ConsumerService) processMessage(msg *sarama.ConsumerMessage) {
 		// Continue processing even if log fails
 	}
 
+	// Clean the JSON message (remove literal newlines and fix trailing commas)
+	cleanedJSON := cleanJSONMessage(msg.Value)
+
 	// Parse the JSON message
 	var orderMsg OrderMessage
-	if err := json.Unmarshal(msg.Value, &orderMsg); err != nil {
+	if err := json.Unmarshal(cleanedJSON, &orderMsg); err != nil {
 		log.Printf("Error unmarshaling message: %s\n", err.Error())
+		log.Printf("Cleaned JSON was: %s\n", string(cleanedJSON))
 		// Update kafka log with error
 		cs.db.Model(&kafkaLog).Updates(map[string]interface{}{
 			"status": "parse_failed",
@@ -200,16 +294,8 @@ func (cs *ConsumerService) processMessage(msg *sarama.ConsumerMessage) {
 		return
 	}
 
-	// Check if address with same PhoneNo already exists (invalid - duplicate customer)
-	var existingAddress order.Address
-	if err := cs.db.Where("phone_no = ?", orderMsg.Address.PhoneNo).First(&existingAddress).Error; err == nil {
-		log.Printf("Address with phone_no %s already exists (ID: %d), invalid duplicate order\n", orderMsg.Address.PhoneNo, existingAddress.ID)
-		cs.db.Model(&kafkaLog).Updates(map[string]interface{}{
-			"status": "duplicate_phone_number",
-			"error":  fmt.Sprintf("address with phone_no %s already exists", orderMsg.Address.PhoneNo),
-		})
-		return
-	}
+	// Note: Duplicate phone numbers, QR codes, and names are allowed
+	// Multiple orders can be sent to the same recipient
 
 	// Check if order with same sequence already exists
 	var existingOrder order.Order

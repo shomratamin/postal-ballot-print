@@ -860,7 +860,7 @@ func (dm *DynamicMigrator) generateAddUniqueConstraintSQL(tableName, columnName,
 
 // generateDropUniqueConstraintSQL generates SQL for dropping a unique constraint
 func (dm *DynamicMigrator) generateDropUniqueConstraintSQL(tableName, constraintName string) string {
-	return fmt.Sprintf(`ALTER TABLE "%s" DROP CONSTRAINT "%s"`, tableName, constraintName)
+	return fmt.Sprintf(`ALTER TABLE "%s" DROP CONSTRAINT IF EXISTS "%s"`, tableName, constraintName)
 }
 
 // ForeignKeyConstraint represents an existing foreign key constraint
@@ -1425,7 +1425,7 @@ func (dm *DynamicMigrator) generateAddColumnSQL(tableName string, field FieldInf
 }
 
 func (dm *DynamicMigrator) generateDropColumnSQL(tableName, columnName string) string {
-	return fmt.Sprintf(`ALTER TABLE "%s" DROP COLUMN "%s"`, tableName, columnName)
+	return fmt.Sprintf(`ALTER TABLE "%s" DROP COLUMN IF EXISTS "%s"`, tableName, columnName)
 }
 
 func (dm *DynamicMigrator) generateModifyColumnSQL(tableName string, field FieldInfo) string {

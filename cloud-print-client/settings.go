@@ -35,33 +35,14 @@ type AppSettingsData struct {
 	AUTO_INSTALL_UPDATES  bool   `json:"auto_install_updates"`
 }
 
-func NewAppSettings() *AppSettings {
-	return &AppSettings{
-		PUBLIC_KEY_URL:    "https://sso.ekdak.com/sso/fetch-public-key/",
-		TEST_PDF_URL:      "https://ekdak.com/print/generate-test-mashul/",
-		LIVE_PDf_URL:      "https://ekdak.com/print/generate-mashul/",
-		SPECIMEN_PDF_URL:  "https://ekdak.com/print/generate-specimen-mashul/",
-		INTERNAL_PDF_URL:  "https://ekdak.com/print/generate-internal-mashul/",
-		SOCKET_URL:        "wss://election2026.ekdak.com/v1/ws",
-		WT_DIM_MACHINE_ID: "",
-		CAMERA_ID:         "",
-		// Auto-update settings with defaults
-		UPDATE_MANIFEST_URL:   "https://mdm.smartpostbd.com/files/update-manifest.json",
-		UPDATE_CHECK_INTERVAL: 60, // Check every 60 minutes
-		AUTO_UPDATE_ENABLED:   true,
-		AUTO_DOWNLOAD_UPDATES: true,
-		AUTO_INSTALL_UPDATES:  true, // Require user confirmation by default
-	}
-}
-
 // func NewAppSettings() *AppSettings {
 // 	return &AppSettings{
-// 		PUBLIC_KEY_URL:    "http://192.168.1.18:8000/sso/fetch-public-key/",
-// 		TEST_PDF_URL:      "http://192.168.1.18:8002/print/generate-test-mashul/",
-// 		LIVE_PDf_URL:      "http://192.168.1.18:8002/print/generate-mashul/",
-// 		SPECIMEN_PDF_URL:  "http://192.168.1.18:8002/print/generate-specimen-mashul/",
-// 		INTERNAL_PDF_URL:  "http://192.168.1.18:8002/print/generate-internal-mashul/",
-// 		SOCKET_URL:        "ws://192.168.1.18:3005/ws",
+// 		PUBLIC_KEY_URL:    "https://sso.ekdak.com/sso/fetch-public-key/",
+// 		TEST_PDF_URL:      "https://ekdak.com/print/generate-test-mashul/",
+// 		LIVE_PDf_URL:      "https://ekdak.com/print/generate-mashul/",
+// 		SPECIMEN_PDF_URL:  "https://ekdak.com/print/generate-specimen-mashul/",
+// 		INTERNAL_PDF_URL:  "https://ekdak.com/print/generate-internal-mashul/",
+// 		SOCKET_URL:        "wss://election2026.ekdak.com/v1/ws",
 // 		WT_DIM_MACHINE_ID: "",
 // 		CAMERA_ID:         "",
 // 		// Auto-update settings with defaults
@@ -72,6 +53,25 @@ func NewAppSettings() *AppSettings {
 // 		AUTO_INSTALL_UPDATES:  true, // Require user confirmation by default
 // 	}
 // }
+
+func NewAppSettings() *AppSettings {
+	return &AppSettings{
+		PUBLIC_KEY_URL:    "http://192.168.1.18:8000/sso/fetch-public-key/",
+		TEST_PDF_URL:      "http://192.168.1.18:8002/print/generate-test-mashul/",
+		LIVE_PDf_URL:      "http://192.168.1.18:8056/api/print/print-envelope/",
+		SPECIMEN_PDF_URL:  "http://192.168.1.18:8002/print/generate-specimen-mashul/",
+		INTERNAL_PDF_URL:  "http://192.168.1.18:8002/print/generate-internal-mashul/",
+		SOCKET_URL:        "ws://192.168.1.18:8056/ws",
+		WT_DIM_MACHINE_ID: "",
+		CAMERA_ID:         "",
+		// Auto-update settings with defaults
+		UPDATE_MANIFEST_URL:   "https://mdm.smartpostbd.com/files/update-manifest.json",
+		UPDATE_CHECK_INTERVAL: 60, // Check every 60 minutes
+		AUTO_UPDATE_ENABLED:   true,
+		AUTO_DOWNLOAD_UPDATES: true,
+		AUTO_INSTALL_UPDATES:  true, // Require user confirmation by default
+	}
+}
 
 // func NewAppSettings() *AppSettings {
 // 	return &AppSettings{

@@ -23,7 +23,14 @@ export const emptyEnvelopeListResponse: EnvelopeListResponse = {
 
 const fetchEnvelopeList = async (token: string, queryParams: EnvelopeListRequestParams = {}): Promise<EnvelopeListResponse> => {
     try {
-        const url = new URL(`${process.env.NEXT_PUBLIC_BACKEND_API_URL}/api/order/order-list`);
+        // const baseUrl = process.env.NEXT_PUBLIC_BACKEND_API_URL;
+        const baseUrl = "https://election2026.ekdak.com/v1";
+        if (!baseUrl) {
+            console.error("NEXT_PUBLIC_BACKEND_API_URL is not defined");
+            return emptyEnvelopeListResponse;
+        }
+
+        const url = new URL(`${baseUrl}/api/order/order-list`);
 
         if (queryParams.search) {
             url.searchParams.append("search", queryParams.search);

@@ -83,11 +83,15 @@ type (
 
 	// PrintJob represents a print job to be sent to a client
 	PrintJob struct {
-		JobID     string                 `json:"job_id"`
-		JobType   string                 `json:"job_type"`
-		Command   string                 `json:"command"`
-		Data      map[string]interface{} `json:"data"`
-		PrinterID string                 `json:"printer_id"`
-		CreatedAt time.Time              `json:"created_at"`
+		PrinterID string  `json:"printer_id"`
+		JobID     string  `json:"job_id"`
+		JobToken  string  `json:"job_token"`
+		Command   string  `json:"command"`
+		Width     float64 `json:"width"`
+		Height    float64 `json:"height"`
+		Unit      string  `json:"unit"`
+		Barcode   string  `json:"barcode"`
+		Mashul    string  `json:"mashul"`
+		Weight    string  `json:"weight"`
 	}
 )

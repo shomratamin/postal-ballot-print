@@ -324,6 +324,11 @@ func (pm *PrintManager) processPDFPagesInMemory(pdfReader *model.PdfReader, numP
 		dpi := 300
 		widthPx := int(job.Width * float64(dpi))
 		heightPx := int(job.Height * float64(dpi))
+		console.MsgChan <- Message{
+			Text: fmt.Sprintf("Fallback: rendering at fixed 300 DPI (%dpx x %dpx for %.1f\" x %.1f\")",
+				widthPx, heightPx, job.Width, job.Height),
+			Color: colorNRGBA(0, 255, 255, 255), // Cyan
+		}
 		return pm.processPDFPagesWithFixedDPI(pdfReader, numPages, job, console, widthPx, heightPx)
 	}
 	defer procDeleteDC.Call(hDC)

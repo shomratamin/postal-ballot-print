@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	printclient "printenvelope/controllers/print-client"
 	"printenvelope/logger"
 	"printenvelope/models/order"
 	"printenvelope/models/print"
@@ -274,6 +275,29 @@ func (pc *PrintController) PrintBatch(c *fiber.Ctx) error {
 	// Log the activity
 	logger.Success(fmt.Sprintf("Created print batch job for batch %s with %d orders", req.BatchNumber, len(batchItems)))
 
+	// Send print job to printer client
+	printData := types.PrintJob{
+		JobID:     printBatchJob.JobUuid,
+		PrinterID: printBatchJob.PrinterID,
+		Command:   printBatchJob.Command,
+		JobToken:  printBatchJob.JobToken,
+		Barcode:   "",
+		Mashul:    "",
+		Weight:    "",
+		Width:     8.5,
+		Height:    7.75,
+		Unit:      "inch",
+	}
+
+	jobID, err := printclient.SendPrintJobDirect(printData)
+
+	if err != nil {
+		logger.Error("Failed to send print job to printer client", err)
+		// Continue anyway - job is created in DB
+	} else {
+		logger.Success(fmt.Sprintf("Sent print job to printer client with job ID: %s", jobID))
+	}
+
 	// Return success response
 	return c.Status(fiber.StatusCreated).JSON(types.ApiResponse{
 		Message: "Print batch job created successfully",
@@ -287,6 +311,7 @@ func (pc *PrintController) PrintBatch(c *fiber.Ctx) error {
 				"started_at":   printBatchJob.StartedAt,
 			},
 			"total_print_jobs": len(printSingleJobs),
+			"printer_job_id":   jobID,
 		},
 	})
 }

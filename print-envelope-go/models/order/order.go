@@ -5,12 +5,12 @@ import "time"
 // Address represents the recipient address information
 type Address struct {
 	ID                 uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	RecipientForeName  string `gorm:"type:varchar(255);not null" json:"recipient_fore_name"`
+	RecipientForeName  string `gorm:"type:varchar(255)" json:"recipient_fore_name"`
 	RecipientOtherName string `gorm:"type:varchar(255)" json:"recipient_other_name"`
-	PostalAddress      string `gorm:"type:text;not null" json:"postal_address"`
-	ZipCode            string `gorm:"type:varchar(20);not null" json:"zip_code"`
-	City               string `gorm:"type:varchar(255);not null" json:"city"`
-	PhoneNo            string `gorm:"type:varchar(20);unique;not null" json:"phone_no"`
+	PostalAddress      string `gorm:"type:text" json:"postal_address"`
+	ZipCode            string `gorm:"type:varchar(20)" json:"zip_code"`
+	City               string `gorm:"type:varchar(255)" json:"city"`
+	PhoneNo            string `gorm:"type:varchar(20)" json:"phone_no"`
 	QrID               string `gorm:"type:varchar(255)" json:"qr_id"`
 	CountryCode        string `gorm:"type:varchar(10)" json:"country_code"`
 
@@ -24,13 +24,13 @@ type Address struct {
 type ReturningAddress struct {
 	ID                     uint   `gorm:"primaryKey;autoIncrement" json:"id"`
 	DistrictHeadPostOffice string `gorm:"type:varchar(255)" json:"district_head_post_office"`
-	ZipCode                string `gorm:"type:varchar(20);unique;not null" json:"zip_code"`
+	ZipCode                string `gorm:"type:varchar(20)" json:"zip_code"`
 	District               string `gorm:"type:varchar(255)" json:"district"`
 
 	CreatedAt time.Time  `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
 	DeletedAt *time.Time `gorm:"index" json:"deleted_at,omitempty"`
-	IsDeleted bool       `gorm:"not null;default:false" json:"is_deleted"`
+	IsDeleted bool       `gorm:"default:false" json:"is_deleted"`
 }
 
 // Order represents the main order structure

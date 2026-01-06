@@ -11,7 +11,8 @@ import (
 
 var appSettings = NewAppSettings()
 var weightdimensionMachineManager = NewWeightDimMachineManager()
-var autoUpdater *AutoUpdater
+
+// var autoUpdater *AutoUpdater
 
 func main() {
 	appSettings.LoadAppSettings()
@@ -30,7 +31,7 @@ func main() {
 	console := NewConsole(70)
 
 	// Initialize the Auto-updater
-	autoUpdater = NewAutoUpdater(appSettings, console)
+	// autoUpdater = NewAutoUpdater(appSettings, console)
 
 	// Initialize the PrintManager with a buffer size of 10 print jobs
 	printManager := NewPrintManager(1000)
@@ -49,7 +50,7 @@ func main() {
 		w.Option(app.Title(version_text))
 
 		// Start the auto-updater after window is created
-		go autoUpdater.Start(w)
+		// go autoUpdater.Start(w)
 
 		close(done)
 		if err := loop(w, console, printManager, printersChan, auth_message.Token); err != nil {
@@ -57,7 +58,7 @@ func main() {
 		}
 
 		// Stop auto-updater before exiting
-		autoUpdater.Stop()
+		// autoUpdater.Stop()
 		os.Exit(0)
 	}()
 

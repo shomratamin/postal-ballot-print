@@ -28,6 +28,7 @@ type PrintBatchJob struct {
 	PrinterID    string `gorm:"type:varchar(255);index" json:"printer_id,omitempty"`
 	Command      string `gorm:"type:varchar(255);index" json:"command,omitempty"`
 	JobType      string `gorm:"type:varchar(255);index" json:"job_type,omitempty"`
+	JobToken     string `gorm:"type:varchar(255);index" json:"job_token,omitempty"`
 	JobUuid      string `gorm:"type:varchar(255);index" json:"job_uuid,omitempty"`
 
 	CreatedAt   time.Time  `gorm:"autoCreateTime;index" json:"created_at"`
@@ -51,6 +52,7 @@ type PrintSingleJob struct {
 	PrinterID string `gorm:"type:varchar(255);index" json:"printer_id,omitempty"`
 	Command   string `gorm:"type:varchar(255);index" json:"command,omitempty"`
 	JobType   string `gorm:"type:varchar(255);index" json:"job_type,omitempty"`
+	JobToken  string `gorm:"type:varchar(255);index" json:"job_token,omitempty"`
 	JobUuid   string `gorm:"type:varchar(255);index" json:"job_uuid,omitempty"`
 
 	CreatedAt time.Time  `gorm:"autoCreateTime;index" json:"created_at"`

@@ -3,6 +3,7 @@ package printclient
 import (
 	"encoding/json"
 	"log"
+	"printenvelope/types"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -29,50 +30,50 @@ func (pcc *PrintClientController) GetMetrics(c *fiber.Ctx) error {
 	})
 }
 
-// SendPrintJob sends a print job to a specific printer
-func (pcc *PrintClientController) SendPrintJob(c *fiber.Ctx) error {
-	var req struct {
-		PrinterID string                 `json:"printer_id" validate:"required"`
-		JobType   string                 `json:"job_type" validate:"required"`
-		Command   string                 `json:"command" validate:"required"`
-		Data      map[string]interface{} `json:"data" validate:"required"`
-	}
+// // SendPrintJob sends a print job to a specific printer
+// func (pcc *PrintClientController) SendPrintJob(c *fiber.Ctx) error {
+// 	var req struct {
+// 		PrinterID string                 `json:"printer_id" validate:"required"`
+// 		JobType   string                 `json:"job_type" validate:"required"`
+// 		Command   string                 `json:"command" validate:"required"`
+// 		Data      map[string]interface{} `json:"data" validate:"required"`
+// 	}
 
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Invalid request payload",
-		})
-	}
+// 	if err := c.BodyParser(&req); err != nil {
+// 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+// 			"status":  "error",
+// 			"message": "Invalid request payload",
+// 		})
+// 	}
 
-	// Create print job
-	job := PrintJob{
-		JobID:     generateJobID(),
-		JobType:   req.JobType,
-		Command:   req.Command,
-		Data:      req.Data,
-		PrinterID: req.PrinterID,
-	}
+// 	// Create print job
+// 	job := PrintJob{
+// 		JobID:     generateJobID(),
+// 		JobType:   req.JobType,
+// 		Command:   req.Command,
+// 		Data:      req.Data,
+// 		PrinterID: req.PrinterID,
+// 	}
 
-	// Convert to JSON
-	jobJSON, err := json.Marshal(job)
-	if err != nil {
-		log.Printf("Failed to marshal print job: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"status":  "error",
-			"message": "Failed to create print job",
-		})
-	}
+// 	// Convert to JSON
+// 	jobJSON, err := json.Marshal(job)
+// 	if err != nil {
+// 		log.Printf("Failed to marshal print job: %v", err)
+// 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+// 			"status":  "error",
+// 			"message": "Failed to create print job",
+// 		})
+// 	}
 
-	// Send to printer via channel
-	PushNotification("printer-channel", req.PrinterID, string(jobJSON))
+// 	// Send to printer via channel
+// 	PushNotification("printer-channel", req.PrinterID, string(jobJSON))
 
-	return c.JSON(fiber.Map{
-		"status":  "success",
-		"message": "Print job sent successfully",
-		"job_id":  job.JobID,
-	})
-}
+// 	return c.JSON(fiber.Map{
+// 		"status":  "success",
+// 		"message": "Print job sent successfully",
+// 		"job_id":  job.JobID,
+// 	})
+// }
 
 // GetConnectedPrinters returns a list of connected printers
 func (pcc *PrintClientController) GetConnectedPrinters(c *fiber.Ctx) error {
@@ -117,6 +118,23 @@ func (pcc *PrintClientController) DisconnectPrinter(c *fiber.Ctx) error {
 		"status":  "success",
 		"message": "Printer disconnection requested",
 	})
+}
+
+// SendPrintJobDirect sends a print job directly without HTTP context
+// Returns the job ID and any error that occurred
+func SendPrintJobDirect(data types.PrintJob) (string, error) {
+
+	// Convert to JSON
+	jobJSON, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Failed to marshal print job: %v", err)
+		return "", err
+	}
+
+	// Send to printer via channel
+	PushNotification("printer-channel", data.PrinterID, string(jobJSON))
+
+	return data.JobID, nil
 }
 
 func generateJobID() string {
