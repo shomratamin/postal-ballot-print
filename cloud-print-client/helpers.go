@@ -115,9 +115,11 @@ func downloadPDF(command string, job_id string, job_token string) ([]byte, error
 	test_url := appSettings.TEST_PDF_URL
 	specimen_url := appSettings.SPECIMEN_PDF_URL
 	internal_url := appSettings.INTERNAL_PDF_URL
+	http_method := "POST"
 
 	if command == "test-print" {
 		url = test_url
+		http_method = "GET"
 	}
 	if command == "specimen-print" {
 		url = specimen_url
@@ -136,7 +138,7 @@ func downloadPDF(command string, job_id string, job_token string) ([]byte, error
 		return nil, fmt.Errorf("failed to marshal request body: %v", err)
 	}
 
-	request, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	request, err := http.NewRequest(http_method, url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -159,6 +161,11 @@ func downloadPDF(command string, job_id string, job_token string) ([]byte, error
 	data, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read PDF data: %v", err)
+	}
+	//save pdf to out folder for testing
+	err = os.WriteFile("out/downloaded.pdf", data, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save downloaded PDF: %v", err)
 	}
 
 	return data, nil

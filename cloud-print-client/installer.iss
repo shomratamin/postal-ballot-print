@@ -11,8 +11,10 @@ DisableProgramGroupPage=yes
 
 [Files]
 Source: "main.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "evnts.bin"; DestDir: "{app}\data"; Flags: ignoreversion onlyifdoesntexist
 Source: "bin\gsdll64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "bin\gswin64c.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "app_settings.json"; DestDir: "{app}\data"; Flags: ignoreversion onlyifdoesntexist
 Source: "fonts\kalpurush.ttf"; DestDir: "{app}\fonts"; Flags: ignoreversion
 Source: "fonts\RobotoMono-VariableFont_wght.ttf"; DestDir: "{app}\fonts"; Flags: ignoreversion
 Source: "bpo.svg"; DestDir: "{app}"; Flags: ignoreversion

@@ -54,13 +54,33 @@ type AppSettingsData struct {
 // 	}
 // }
 
+// func NewAppSettings() *AppSettings {
+// 	return &AppSettings{
+// 		PUBLIC_KEY_URL:    "http://192.168.1.18:8000/sso/fetch-public-key/",
+// 		TEST_PDF_URL:      "https://mdm.smartpostbd.com/files/envelope_AAAA100000001-test.pdf",
+// 		LIVE_PDf_URL:      "http://192.168.1.18:8056/api/print/envelope-pdf-generator/",
+// 		SPECIMEN_PDF_URL:  "http://192.168.1.18:8002/print/generate-specimen-mashul/",
+// 		INTERNAL_PDF_URL:  "http://192.168.1.18:8002/print/generate-internal-mashul/",
+// 		SOCKET_URL:        "ws://192.168.1.18:8056/ws",
+// 		WT_DIM_MACHINE_ID: "",
+// 		CAMERA_ID:         "",
+// 		// Auto-update settings with defaults
+// 		UPDATE_MANIFEST_URL:   "https://mdm.smartpostbd.com/files/update-manifest.json",
+// 		UPDATE_CHECK_INTERVAL: 60, // Check every 60 minutes
+// 		AUTO_UPDATE_ENABLED:   true,
+// 		AUTO_DOWNLOAD_UPDATES: true,
+// 		AUTO_INSTALL_UPDATES:  true, // Require user confirmation by default
+// 	}
+// }
+
 func NewAppSettings() *AppSettings {
 	return &AppSettings{
 		PUBLIC_KEY_URL:    "http://192.168.1.18:8000/sso/fetch-public-key/",
-		TEST_PDF_URL:      "http://192.168.1.18:8002/print/generate-test-mashul/",
-		LIVE_PDf_URL:      "http://192.168.1.18:8056/api/print/print-envelope/",
+		TEST_PDF_URL:      "https://mdm.smartpostbd.com/files/envelope_AAAA100000001-test.pdf",
+		LIVE_PDf_URL:      "http://192.168.1.18:8056/api/print/envelope-pdf-generator/",
 		SPECIMEN_PDF_URL:  "http://192.168.1.18:8002/print/generate-specimen-mashul/",
 		INTERNAL_PDF_URL:  "http://192.168.1.18:8002/print/generate-internal-mashul/",
+		// SOCKET_URL:        "wss://election2026.ekdak.com/v1/ws",
 		SOCKET_URL:        "ws://192.168.1.18:8056/ws",
 		WT_DIM_MACHINE_ID: "",
 		CAMERA_ID:         "",
@@ -113,7 +133,7 @@ func (app_settings *AppSettings) GetCameraID() string {
 
 func (appSettings *AppSettings) SaveAppSettings() error {
 	// Save app settings to a file
-	fileToSave := "app_settings.json"
+	fileToSave := "data/app_settings.json"
 	dataToSave := AppSettingsData{
 		WT_DIM_MACHINE_ID: appSettings.WT_DIM_MACHINE_ID,
 		CAMERA_ID:         appSettings.CAMERA_ID,
@@ -130,7 +150,7 @@ func (appSettings *AppSettings) SaveAppSettings() error {
 
 func (appSettings *AppSettings) LoadAppSettings() error {
 	// Load app settings from a file
-	fileToLoad := "app_settings.json"
+	fileToLoad := "data/app_settings.json"
 	var data AppSettingsData
 
 	err := loadJSONFromFile(fileToLoad, &data)

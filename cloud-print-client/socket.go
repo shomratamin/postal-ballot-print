@@ -28,16 +28,17 @@ type AuthMessage struct {
 }
 
 type PrintCommand struct {
-	PrinterID string  `json:"printer_id"`
-	JobID     string  `json:"job_id"`
-	JobToken  string  `json:"job_token"`
-	Command   string  `json:"command"`
-	Width     float64 `json:"width"`
-	Height    float64 `json:"height"`
-	Unit      string  `json:"unit"`
-	Barcode   string  `json:"barcode"`
-	Mashul    string  `json:"mashul"`
-	Weight    string  `json:"weight"`
+	PrinterID        string  `json:"printer_id"`
+	PrintOrientation string  `json:"print_orientation"`
+	JobID            string  `json:"job_id"`
+	JobToken         string  `json:"job_token"`
+	Command          string  `json:"command"`
+	Width            float64 `json:"width"`
+	Height           float64 `json:"height"`
+	Unit             string  `json:"unit"`
+	Barcode          string  `json:"barcode"`
+	Mashul           string  `json:"mashul"`
+	Weight           string  `json:"weight"`
 }
 
 type OutGoingLog struct {

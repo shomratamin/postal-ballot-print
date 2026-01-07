@@ -27,7 +27,7 @@ import (
 	"github.com/skip2/go-qrcode"
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
-	"golang.org/x/exp/shiny/materialdesign/icons"
+	// "golang.org/x/exp/shiny/materialdesign/icons"
 )
 
 // Type aliases for convenience
@@ -54,8 +54,6 @@ type (
 
 type PrintHistory struct {
 	Barcode string
-	Mashul  string
-	Weight  string
 	Time    string
 }
 
@@ -159,7 +157,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 	small_th.TextSize = unit.Sp(12)
 	small_th.Shaper = text.NewShaper(text.WithCollection(append(gofont.Collection(), robotoMonoFace)))
 
-	saveIcon, _ := widget.NewIcon(icons.ContentSave)
+	// saveIcon, _ := widget.NewIcon(icons.ContentSave)
 
 	// Add Roboto Mono to the text shaper's collection
 	th.Shaper = text.NewShaper(text.WithCollection(
@@ -280,7 +278,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 									}),
 									layout.Rigid(func(gtx C) D {
 										gtx.Constraints.Min.X = gtx.Dp(20) // Add a small gap between the logo and title
-										h6 := material.H6(th, "ডাক যন্ত্র")
+										h6 := material.H6(th, "ডাক যন্ত্র (Ballot Envelope)")
 										h6.TextSize = unit.Sp(35) // Adjust the size as needed
 										h6.Font.Typeface = "Kalpurush"
 										h6.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
@@ -354,19 +352,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 													return h6.Layout(gtx)
 												}),
 												layout.Rigid(func(gtx C) D {
-													h6 := material.H6(table_header_th, "                  Booking ID")
-													h6.Color = color.NRGBA{R: 0, G: 51, B: 102, A: 255}
-													h6.Font.Weight = font.Bold
-													return h6.Layout(gtx)
-												}),
-												layout.Rigid(func(gtx C) D {
-													h6 := material.H6(table_header_th, "         Tk.")
-													h6.Color = color.NRGBA{R: 0, G: 51, B: 102, A: 255}
-													h6.Font.Weight = font.Bold
-													return h6.Layout(gtx)
-												}),
-												layout.Rigid(func(gtx C) D {
-													h6 := material.H6(table_header_th, "      Wt.gm")
+													h6 := material.H6(table_header_th, "                  Batch ID")
 													h6.Color = color.NRGBA{R: 0, G: 51, B: 102, A: 255}
 													h6.Font.Weight = font.Bold
 													return h6.Layout(gtx)
@@ -420,7 +406,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 													return body.Layout(gtx)
 												}),
 												layout.Rigid(func(gtx C) D {
-													body := material.Body1(table_body_th, history.Time+"  ")
+													body := material.Body1(table_body_th, history.Time+"      ")
 													body.Color = body_color
 													if (index+1)%2 == 0 {
 														body.Font.Weight = font.Bold
@@ -435,29 +421,6 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 													}
 
 													return body.Layout(gtx)
-												}),
-												layout.Rigid(func(gtx C) D {
-
-													body := material.Body1(table_body_th, "  "+history.Mashul)
-													body.Color = body_color
-													if (index+1)%2 == 0 {
-														body.Font.Weight = font.Bold
-													}
-													return body.Layout(gtx)
-
-												}),
-												layout.Rigid(func(gtx C) D {
-													_space := strings.Repeat(" ", func() int {
-														return 11 - len(history.Weight)
-													}())
-
-													body := material.Body1(table_body_th, _space+history.Weight)
-													body.Color = body_color
-													if (index+1)%2 == 0 {
-														body.Font.Weight = font.Bold
-													}
-													return body.Layout(gtx)
-
 												}),
 											)
 
@@ -544,7 +507,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 
 												// Wt Mcn ID text
 												layout.Rigid(func(gtx C) D {
-													h6 := material.H6(small_th, "Wt Mcn: ")
+													h6 := material.H6(small_th, client_id)
 													h6.Color = color.NRGBA{R: 0, G: 0, B: 139, A: 255} // Blue color
 													h6.TextSize = unit.Sp(13)                          // Adjust text size as needed
 													h6.Font.Typeface = "RobotoMonoBold"                // Use Roboto Mono font
@@ -553,31 +516,31 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 													return h6.Layout(gtx)
 												}),
 												// Text input field for machine ID
-												layout.Rigid(func(gtx C) D {
-													editor := material.Editor(th, &machineIdEditor, "Wt-Dim Mcn. ID")
-													editor.TextSize = unit.Sp(13)                                  // Adjust text size
-													editor.Color = color.NRGBA{R: 0, G: 0, B: 0, A: 255}           // Black text
-													editor.HintColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255} // Grey hint text
-													editor.Font.Typeface = "RobotoMono"                            // Use Roboto Mono font
-													if weightdimensionMachineManager.allowed_machine.Isset {
-														if machineIdEditor.Text() == "" {
-															machineIdEditor.SetText(weightdimensionMachineManager.allowed_machine.MachineId)
-														}
-													}
-													return editor.Layout(gtx)
-												}),
-												// Save machine id icon button
-												layout.Rigid(func(gtx C) D {
-													btn := material.IconButton(th, &machineIdSaveButton, saveIcon, "")
-													btn.Size = unit.Dp(20) // Adjust the icon size
-													// btn.Inset = layout.Inset{
-													// 	Left: unit.Dp(5), // Add space between text and button
-													// }
-													btn.Background = color.NRGBA{R: 0, G: 0, B: 0, A: 0} // Transparent background
-													btn.Color = colorNRGBA(34, 139, 34, 255)             // ForestGreen color
+												// layout.Rigid(func(gtx C) D {
+												// 	editor := material.Editor(th, &machineIdEditor, "Wt-Dim Mcn. ID")
+												// 	editor.TextSize = unit.Sp(13)                                  // Adjust text size
+												// 	editor.Color = color.NRGBA{R: 0, G: 0, B: 0, A: 255}           // Black text
+												// 	editor.HintColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255} // Grey hint text
+												// 	editor.Font.Typeface = "RobotoMono"                            // Use Roboto Mono font
+												// 	if weightdimensionMachineManager.allowed_machine.Isset {
+												// 		if machineIdEditor.Text() == "" {
+												// 			machineIdEditor.SetText(weightdimensionMachineManager.allowed_machine.MachineId)
+												// 		}
+												// 	}
+												// 	return editor.Layout(gtx)
+												// }),
+												// // Save machine id icon button
+												// layout.Rigid(func(gtx C) D {
+												// 	btn := material.IconButton(th, &machineIdSaveButton, saveIcon, "")
+												// 	btn.Size = unit.Dp(20) // Adjust the icon size
+												// 	// btn.Inset = layout.Inset{
+												// 	// 	Left: unit.Dp(5), // Add space between text and button
+												// 	// }
+												// 	btn.Background = color.NRGBA{R: 0, G: 0, B: 0, A: 0} // Transparent background
+												// 	btn.Color = colorNRGBA(34, 139, 34, 255)             // ForestGreen color
 
-													return btn.Layout(gtx)
-												}),
+												// 	return btn.Layout(gtx)
+												// }),
 											)
 										})
 									}),
@@ -710,8 +673,8 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 
 					printCommand := PrintCommand{
 						Command:   "test-print",
-						Width:     2,
-						Height:    3,
+						Width:     8.5,
+						Height:    7.75,
 						Unit:      "inch",
 						JobID:     "test-print",
 						JobToken:  "test-print",
