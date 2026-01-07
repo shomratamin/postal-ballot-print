@@ -360,181 +360,17 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		img     *image.Gray
 		err     error
 	}
-	
+
 	// Channel for rendering results (unordered)
 	resultChan := make(chan PageResult, numPages)
 	// Channel for ordered page delivery to printer
 	printChan := make(chan *image.Gray, 3) // Buffer 3 pages ahead
 	errChan := make(chan error, 1)
-	
-	maxWorkers := runtime.NumCPU()
-	if maxWorkers > 1 {
-		maxWorkers = maxWorkers - 1 // Leave one CPU free
-	}
-	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("Pipeline mode: %d workers rendering, streaming to printer in order", maxWorkers),
-		Color: colorNRGBA(0, 255, 255, 255), // Cyan
-	}
 
-	// CRITICAL FIX: Mutex to protect pdfReader access - it's NOT thread-safe
-	// Note: This serializes rendering, but ensures correctness
-	var pdfReaderMutex sync.Mutex
+	// CRITICAL: Setup printer DC and start document BEFORE rendering
+	// This ensures the printer is ready to consume pages immediately
+	log.Printf("Setting up printer DC for: %s", job.PrinterName)
 
-	// Producer: Render pages concurrently (with serialized PDF access)
-	semaphore := make(chan struct{}, maxWorkers)
-	var renderWg sync.WaitGroup
-	
-	for pageNum := 1; pageNum <= numPages; pageNum++ {
-		renderWg.Add(1)
-		semaphore <- struct{}{}
-		
-		go func(pNum int) {
-			defer renderWg.Done()
-			defer func() { 
-				<-semaphore 
-				// Recover from any panic to prevent crash
-				if r := recover(); r != nil {
-					log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
-					resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}
-				}
-			}()
-			
-			console.MsgChan <- Message{
-				Text:  fmt.Sprintf("Rendering page %d/%d...", pNum, numPages),
-				Color: colorNRGBA(0, 255, 255, 255), // Cyan
-			}
-
-			// Lock pdfReader for thread-safe access
-			pdfReaderMutex.Lock()
-			img, err := pm.renderPDFPageToMonochrome(pdfReader, pNum, widthPx, heightPx)
-			pdfReaderMutex.Unlock()
-			
-			if err != nil {
-				log.Printf("ERROR rendering page %d: %v", pNum, err)
-				resultChan <- PageResult{pageNum: pNum, img: nil, err: err}
-				return
-			}
-
-			// Validate image before sending
-			if img == nil || img.Pix == nil || len(img.Pix) == 0 {
-				log.Printf("ERROR: page %d rendered nil or empty image", pNum)
-				resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}
-				return
-			}
-
-			// Save debug images to "out" folder
-			if err := saveRenderedImageForDebug(img, pNum, job.JobID); err != nil {
-				log.Printf("Warning: Failed to save debug image for page %d: %v", pNum, err)
-			}
-
-			console.MsgChan <- Message{
-				Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, img.Bounds().Dx(), img.Bounds().Dy()),
-				Color: colorNRGBA(0, 255, 0, 255), // Green
-			}
-
-			resultChan <- PageResult{pageNum: pNum, img: img, err: nil}
-		}(pageNum)
-	}
-	
-	// Close result channel after all rendering completes
-	go func() {
-		renderWg.Wait()
-		close(resultChan)
-	}()
-
-	// Sequencer: Receive unordered results and send to printer in correct order
-	go func() {
-		defer close(printChan)
-		
-		pageBuffer := make(map[int]*image.Gray)
-		nextPageToSend := 1
-		hasError := false
-		
-		for result := range resultChan {
-			if result.err != nil {
-				hasError = true
-				select {
-				case errChan <- fmt.Errorf("render page %d: %w", result.pageNum, result.err):
-				default:
-				}
-				// Continue draining resultChan to avoid goroutine leaks
-				continue
-			}
-			
-			// If we already have an error, just drain the channel
-			if hasError {
-				continue
-			}
-			
-			// Store this page
-			pageBuffer[result.pageNum] = result.img
-			
-			// Send all consecutive pages starting from nextPageToSend
-			for {
-				if img, ok := pageBuffer[nextPageToSend]; ok {
-					// Validate image before copying
-					if img == nil || img.Pix == nil || len(img.Pix) == 0 {
-						log.Printf("ERROR: Invalid image in buffer for page %d", nextPageToSend)
-						hasError = true
-						select {
-						case errChan <- fmt.Errorf("invalid image for page %d", nextPageToSend):
-						default:
-						}
-						break
-					}
-					
-					// Create a deep copy of the image to prevent memory corruption
-					// CRITICAL: Allocate new memory for Pix buffer
-					imgCopy := &image.Gray{
-						Pix:    make([]byte, len(img.Pix)),
-						Stride: img.Stride,
-						Rect:   img.Rect,
-					}
-					copy(imgCopy.Pix, img.Pix)
-					
-					log.Printf("Sequencer: Sending page %d to printer (size: %dx%d, pix: %d bytes)", 
-						nextPageToSend, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy(), len(imgCopy.Pix))
-					
-					printChan <- imgCopy
-					delete(pageBuffer, nextPageToSend)
-					nextPageToSend++
-				} else {
-					break
-				}
-			}
-		}
-		
-		// After resultChan is closed, verify we sent all pages
-		if !hasError && nextPageToSend <= numPages {
-			// Send any remaining buffered pages (shouldn't happen but safety check)
-			for i := nextPageToSend; i <= numPages; i++ {
-				if img, ok := pageBuffer[i]; ok {
-					printChan <- img
-					delete(pageBuffer, i)
-				}
-			}
-		}
-		
-		log.Printf("Sequencer finished: sent %d pages, has error: %v", nextPageToSend-1, hasError)
-	}()
-
-	// Consumer: Print pages as they arrive in order
-	if err := pm.printPagesFromChannelOrdered(printChan, errChan, numPages, job, console); err != nil {
-		return err
-	}
-
-	// Check for rendering errors
-	select {
-	case err := <-errChan:
-		return err
-	default:
-		return nil
-	}
-}
-
-// printPagesFromChannelOrdered prints pages from channel in correct order
-func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, job PrintJob, console *Console) error {
-	// Create printer device context
 	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
 	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
 
@@ -543,9 +379,12 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		uintptr(unsafe.Pointer(printerNamePtr)),
 		0, 0)
 	if hDC == 0 {
+		log.Printf("ERROR: Failed to create printer DC: %v", err)
 		return fmt.Errorf("failed to create printer DC: %v", err)
 	}
 	defer procDeleteDC.Call(hDC)
+
+	log.Printf("Printer DC created successfully, starting document...")
 
 	// Get printer capabilities
 	pageWidthPx, _, _ := procGetDeviceCaps.Call(hDC, HORZRES)
@@ -560,17 +399,200 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		FwType:       0,
 	}
 
-	ret, _, err := procStartDoc.Call(hDC, uintptr(unsafe.Pointer(&docInfo)))
+	var ret uintptr
+	ret, _, err = procStartDoc.Call(hDC, uintptr(unsafe.Pointer(&docInfo)))
 	if ret <= 0 {
+		log.Printf("ERROR: Failed to start document: %v", err)
 		return fmt.Errorf("failed to start document: %v", err)
 	}
 	defer procEndDoc.Call(hDC)
 
+	log.Printf("Document started successfully, launching render pipeline...")
+
+	console.MsgChan <- Message{
+		Text:  fmt.Sprintf("Printer ready - starting %d page render pipeline", numPages),
+		Color: colorNRGBA(0, 255, 255, 255), // Cyan
+	}
+
+	maxWorkers := runtime.NumCPU()
+	if maxWorkers > 1 {
+		maxWorkers = maxWorkers - 1 // Leave one CPU free
+	}
+
+	// CRITICAL FIX: Mutex to protect pdfReader access - it's NOT thread-safe
+	var pdfReaderMutex sync.Mutex
+
+	// Producer: Render pages concurrently (with serialized PDF access)
+	semaphore := make(chan struct{}, maxWorkers)
+	var renderWg sync.WaitGroup
+
+	// Launch render goroutines in background so we don't block the printer
+	go func() {
+		for pageNum := 1; pageNum <= numPages; pageNum++ {
+			renderWg.Add(1)
+			semaphore <- struct{}{} // This will block after maxWorkers, but we're in a goroutine so it's OK
+
+			go func(pNum int) {
+				defer renderWg.Done()
+				defer func() {
+					<-semaphore
+					// Recover from any panic to prevent crash
+					if r := recover(); r != nil {
+						log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
+						resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}
+					}
+				}()
+
+				console.MsgChan <- Message{
+					Text:  fmt.Sprintf("Rendering page %d/%d...", pNum, numPages),
+					Color: colorNRGBA(0, 255, 255, 255), // Cyan
+				}
+
+				// Pass mutex to the render function - it will lock only for GetPage()
+				img, err := pm.renderPDFPageToMonochrome(pdfReader, pNum, widthPx, heightPx, &pdfReaderMutex)
+
+				if err != nil {
+					log.Printf("ERROR rendering page %d: %v", pNum, err)
+					resultChan <- PageResult{pageNum: pNum, img: nil, err: err}
+					return
+				}
+
+				// Validate image before sending
+				if img == nil || img.Pix == nil || len(img.Pix) == 0 {
+					log.Printf("ERROR: page %d rendered nil or empty image", pNum)
+					resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}
+					return
+				}
+
+				console.MsgChan <- Message{
+					Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, img.Bounds().Dx(), img.Bounds().Dy()),
+					Color: colorNRGBA(0, 255, 0, 255), // Green
+				}
+
+				// Send to printer IMMEDIATELY - don't wait for file I/O
+				resultChan <- PageResult{pageNum: pNum, img: img, err: nil}
+
+				// Save debug images asynchronously - don't block the printing pipeline
+				go func(image *image.Gray, pageNumber int, jobID string) {
+					if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
+						log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
+					}
+				}(img, pNum, job.JobID)
+			}(pageNum)
+		}
+	}()
+
+	// Close result channel after all rendering completes
+	go func() {
+		renderWg.Wait()
+		close(resultChan)
+	}()
+
+	// Sequencer: Receive unordered results and send to printer in correct order
+	go func() {
+		defer close(printChan)
+
+		pageBuffer := make(map[int]*image.Gray)
+		nextPageToSend := 1
+		hasError := false
+
+		for result := range resultChan {
+			if result.err != nil {
+				hasError = true
+				select {
+				case errChan <- fmt.Errorf("render page %d: %w", result.pageNum, result.err):
+				default:
+				}
+				// Continue draining resultChan to avoid goroutine leaks
+				continue
+			}
+
+			// If we already have an error, just drain the channel
+			if hasError {
+				continue
+			}
+
+			// Store this page
+			pageBuffer[result.pageNum] = result.img
+
+			// Send all consecutive pages starting from nextPageToSend
+			for {
+				if img, ok := pageBuffer[nextPageToSend]; ok {
+					// Validate image before copying
+					if img == nil || img.Pix == nil || len(img.Pix) == 0 {
+						log.Printf("ERROR: Invalid image in buffer for page %d", nextPageToSend)
+						hasError = true
+						select {
+						case errChan <- fmt.Errorf("invalid image for page %d", nextPageToSend):
+						default:
+						}
+						break
+					}
+
+					// Create a deep copy of the image to prevent memory corruption
+					// CRITICAL: Allocate new memory for Pix buffer
+					imgCopy := &image.Gray{
+						Pix:    make([]byte, len(img.Pix)),
+						Stride: img.Stride,
+						Rect:   img.Rect,
+					}
+					copy(imgCopy.Pix, img.Pix)
+
+					log.Printf("Sequencer: Sending page %d to printer (size: %dx%d, pix: %d bytes)",
+						nextPageToSend, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy(), len(imgCopy.Pix))
+
+					printChan <- imgCopy
+					delete(pageBuffer, nextPageToSend)
+					nextPageToSend++
+				} else {
+					break
+				}
+			}
+		}
+
+		// After resultChan is closed, verify we sent all pages
+		if !hasError && nextPageToSend <= numPages {
+			// Send any remaining buffered pages (shouldn't happen but safety check)
+			for i := nextPageToSend; i <= numPages; i++ {
+				if img, ok := pageBuffer[i]; ok {
+					printChan <- img
+					delete(pageBuffer, i)
+				}
+			}
+		}
+
+		log.Printf("Sequencer finished: sent %d pages, has error: %v", nextPageToSend-1, hasError)
+	}()
+
+	// Consumer: Print pages as they arrive in order (printer is already initialized)
+	log.Printf("About to call printer consumer function...")
+	if err := pm.printPagesFromChannel(printChan, errChan, numPages, hDC, pageWidthPx, console); err != nil {
+		return err
+	}
+
+	// Check for rendering errors
+	select {
+	case err := <-errChan:
+		return err
+	default:
+		return nil
+	}
+}
+
+// printPagesFromChannel prints pages from channel - printer DC already initialized
+func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, hDC uintptr, pageWidthPx uintptr, console *Console) error {
 	// Print each page as it arrives (already in correct order)
 	pageNum := 0
+	var ret uintptr
+	var err error
+
+	log.Printf("Printer consumer ready - waiting for first page...")
+
 	for img := range pageChan {
 		pageNum++
-		
+
+		log.Printf("Printer received page %d from channel", pageNum)
+
 		// Check for rendering errors
 		select {
 		case err := <-errChan:
@@ -587,12 +609,12 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		if img == nil {
 			return fmt.Errorf("page %d: received nil image from channel", pageNum)
 		}
-		
+
 		// Get image dimensions - ensure we use actual bounds not min/max
 		bounds := img.Bounds()
 		imgWidth := bounds.Dx()
 		imgHeight := bounds.Dy()
-		
+
 		log.Printf("Page %d: Received image %dpx x %dpx (bounds: %v)", pageNum, imgWidth, imgHeight, bounds)
 
 		// Calculate position (centered)
@@ -611,7 +633,7 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		// Windows DIB requires scan lines to be DWORD-aligned (multiple of 4 bytes)
 		stride := (imgWidth + 3) & ^3 // Round up to multiple of 4
 		imageData := make([]byte, stride*imgHeight)
-		
+
 		// Copy grayscale data with stride alignment (top-down format)
 		// Use direct pixel buffer access for better performance and reliability
 		if img.Stride == imgWidth && bounds.Min.X == 0 && bounds.Min.Y == 0 {
@@ -631,8 +653,8 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 				}
 			}
 		}
-		
-		log.Printf("Page %d: DIB created - stride=%d, imgStride=%d, dataSize=%d", 
+
+		log.Printf("Page %d: DIB created - stride=%d, imgStride=%d, dataSize=%d",
 			pageNum, stride, img.Stride, len(imageData))
 
 		// Create bitmap info with 256-color grayscale palette
@@ -676,15 +698,22 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		runtime.KeepAlive(imageData)
 		runtime.KeepAlive(bmi)
 
-		if ret == 0 {
-			return fmt.Errorf("failed to print page %d: %v", pageNum, err)
+		// StretchDIBits returns scan lines on success, GDI_ERROR on failure
+		if int32(ret) == -1 {
+			return fmt.Errorf("failed to StretchDIBits for page %d: %v", pageNum, err)
 		}
 
-		// End page
+		// CRITICAL: Flush GDI before ending page to ensure drawing is complete
+		procGdiFlush.Call()
+
+		// End page - CRITICAL: Must complete before moving to next page
 		ret, _, err = procEndPage.Call(hDC)
 		if ret <= 0 {
 			return fmt.Errorf("failed to end page %d: %v", pageNum, err)
 		}
+
+		// Small delay between pages to prevent overwhelming the spooler
+		time.Sleep(100 * time.Millisecond)
 
 		console.MsgChan <- Message{
 			Text:  fmt.Sprintf("✓ Page %d/%d printed successfully", pageNum, numPages),
@@ -694,162 +723,39 @@ func (pm *PrintManager) printPagesFromChannelOrdered(pageChan <-chan *image.Gray
 		log.Printf("Successfully printed page %d/%d", pageNum, numPages)
 	}
 
+	// CRITICAL: Final flush and wait before ending document
+	// The spooler must have time to process all pages before EndDoc is called
+	procGdiFlush.Call()
+
+	// Wait for spooler to catch up - essential for multi-page documents
+	// Without this, EndDoc may abort pages still being processed
+	log.Printf("Waiting for spooler to process all %d pages...", numPages)
+	time.Sleep(time.Duration(numPages*200) * time.Millisecond)
+
 	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("All %d pages printed", numPages),
+		Text:  fmt.Sprintf("All %d pages sent to spooler", numPages),
 		Color: colorNRGBA(0, 255, 0, 255), // Green
 	}
 
-	return nil
-}
-
-// printPagesFromChannel receives rendered pages and prints them in a single document (DEPRECATED - kept for reference)
-func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, job PrintJob, console *Console) error {
-	// Create printer device context
-	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
-	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
-
-	hDC, _, err := procCreateDC.Call(
-		uintptr(unsafe.Pointer(winspool16Ptr)),
-		uintptr(unsafe.Pointer(printerNamePtr)),
-		0, 0)
-	if hDC == 0 {
-		return fmt.Errorf("failed to create printer DC: %v", err)
-	}
-	defer procDeleteDC.Call(hDC)
-
-	// Get printer capabilities
-	pageWidthPx, _, _ := procGetDeviceCaps.Call(hDC, HORZRES)
-
-	// Start document once
-	jobNamePtr, _ := syscall.UTF16PtrFromString(fmt.Sprintf("Cloud Print Job %s", job.JobID))
-	docInfo := DOCINFO{
-		CbSize:       int32(unsafe.Sizeof(DOCINFO{})),
-		LpszDocName:  jobNamePtr,
-		LpszOutput:   nil,
-		LpszDatatype: nil,
-		FwType:       0,
-	}
-
-	ret, _, err := procStartDoc.Call(hDC, uintptr(unsafe.Pointer(&docInfo)))
-	if ret <= 0 {
-		return fmt.Errorf("failed to start document: %v", err)
-	}
-	defer procEndDoc.Call(hDC)
-
-	// Print each page as it arrives from the channel
-	pageNum := 0
-	for img := range pageChan {
-		pageNum++
-		
-		// Check for rendering errors
-		select {
-		case err := <-errChan:
-			return err
-		default:
-		}
-
-		console.MsgChan <- Message{
-			Text:  fmt.Sprintf("Spooling page %d/%d to printer...", pageNum, numPages),
-			Color: colorNRGBA(0, 255, 255, 255), // Cyan
-		}
-
-		// Get image dimensions
-		bounds := img.Bounds()
-		imgWidth := bounds.Dx()
-		imgHeight := bounds.Dy()
-
-		// Calculate position (centered)
-		offsetX := (int(pageWidthPx) - imgWidth) / 2
-		if offsetX < 0 {
-			offsetX = 0
-		}
-
-		// Start page
-		ret, _, err = procStartPage.Call(hDC)
-		if ret <= 0 {
-			return fmt.Errorf("failed to start page %d: %v", pageNum, err)
-		}
-
-		// Create DIB for current page
-		imageData := make([]byte, imgWidth*imgHeight)
-		for y := 0; y < imgHeight; y++ {
-			for x := 0; x < imgWidth; x++ {
-				pixel := img.GrayAt(x, y)
-				imageData[y*imgWidth+x] = pixel.Y
-			}
-		}
-
-		// Create bitmap info with palette
-		paletteSize := 256
-		bmi := &struct {
-			BmiHeader BITMAPINFOHEADER
-			BmiColors [256]RGBQUAD
-		}{}
-
-		bmi.BmiHeader.BiSize = uint32(unsafe.Sizeof(BITMAPINFOHEADER{}))
-		bmi.BmiHeader.BiWidth = int32(imgWidth)
-		bmi.BmiHeader.BiHeight = -int32(imgHeight)
-		bmi.BmiHeader.BiPlanes = 1
-		bmi.BmiHeader.BiBitCount = 8
-		bmi.BmiHeader.BiCompression = BI_RGB
-		bmi.BmiHeader.BiSizeImage = 0
-		bmi.BmiHeader.BiClrUsed = uint32(paletteSize)
-
-		for i := 0; i < paletteSize; i++ {
-			bmi.BmiColors[i].RgbBlue = uint8(i)
-			bmi.BmiColors[i].RgbGreen = uint8(i)
-			bmi.BmiColors[i].RgbRed = uint8(i)
-			bmi.BmiColors[i].RgbReserved = 0
-		}
-
-		// Print the image
-		ret, _, err = procStretchDIBits.Call(
-			hDC,
-			uintptr(offsetX), uintptr(0),
-			uintptr(imgWidth), uintptr(imgHeight),
-			0, 0,
-			uintptr(imgWidth), uintptr(imgHeight),
-			uintptr(unsafe.Pointer(&imageData[0])),
-			uintptr(unsafe.Pointer(bmi)),
-			DIB_RGB_COLORS,
-			SRCCOPY_STRETCH)
-
-		if ret == 0 {
-			return fmt.Errorf("failed to print page %d: %v", pageNum, err)
-		}
-
-		// End page
-		ret, _, err = procEndPage.Call(hDC)
-		if ret <= 0 {
-			return fmt.Errorf("failed to end page %d: %v", pageNum, err)
-		}
-
-		console.MsgChan <- Message{
-			Text:  fmt.Sprintf("✓ Page %d/%d spooled successfully", pageNum, numPages),
-			Color: colorNRGBA(0, 255, 0, 255), // Green
-		}
-
-		log.Printf("Successfully spooled page %d/%d", pageNum, numPages)
-	}
-
-	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("All %d pages sent to printer", numPages),
-		Color: colorNRGBA(0, 255, 0, 255), // Green
-	}
-
+	log.Printf("All pages sent, calling EndDoc")
 	return nil
 }
 
 // Removed unused thermal printer functions - using universal printing instead
 
 // renderPDFPageToMonochrome renders PDF directly at target DPI without scaling
-func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int) (*image.Gray, error) {
+func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int, mutex *sync.Mutex) (*image.Gray, error) {
+	// Only lock for GetPage - the PDF reader is not thread-safe
+	mutex.Lock()
 	page, err := pdfReader.GetPage(pageNum)
+	mutex.Unlock()
+
 	if err != nil {
 		return nil, fmt.Errorf("get page %d: %w", pageNum, err)
 	}
 
 	// Render directly at target dimensions - no scaling needed
+	// This happens in parallel without mutex lock
 	device := render.NewImageDevice()
 	device.OutputWidth = widthPx
 
@@ -916,17 +822,17 @@ func testPrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 	pdfData, err := downloadPDF("test-print", "", "")
 	if err == nil {
 		printJob := PrintJob{
-			PrinterName: selectedPrinter,
+			PrinterName:      selectedPrinter,
 			PrintOrientation: printCmd.PrintOrientation,
-			Data:        pdfData,
-			Token:       "test-print",
-			Width:       printCmd.Width,
-			Height:      printCmd.Height,
-			JobID:       "test-print",
-			Event:       "test-print",
-			Barcode:     printCmd.Barcode,
-			Mashul:      printCmd.Mashul,
-			Weight:      printCmd.Weight,
+			Data:             pdfData,
+			Token:            "test-print",
+			Width:            printCmd.Width,
+			Height:           printCmd.Height,
+			JobID:            "test-print",
+			Event:            "test-print",
+			Barcode:          printCmd.Barcode,
+			Mashul:           printCmd.Mashul,
+			Weight:           printCmd.Weight,
 		}
 		printManager.handlePrintJob(printJob, console)
 
@@ -946,17 +852,17 @@ func LivePrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 	pdfData, err := downloadPDF("print", printCmd.JobID, printCmd.JobToken)
 	if err == nil {
 		printJob := PrintJob{
-			PrinterName: selectedPrinter,
+			PrinterName:      selectedPrinter,
 			PrintOrientation: printCmd.PrintOrientation,
-			Data:        pdfData,
-			Token:       "live-print",
-			Width:       printCmd.Width,
-			Height:      printCmd.Height,
-			JobID:       printCmd.JobID,
-			Event:       "live-print",
-			Barcode:     printCmd.Barcode,
-			Mashul:      printCmd.Mashul,
-			Weight:      printCmd.Weight,
+			Data:             pdfData,
+			Token:            "live-print",
+			Width:            printCmd.Width,
+			Height:           printCmd.Height,
+			JobID:            printCmd.JobID,
+			Event:            "live-print",
+			Barcode:          printCmd.Barcode,
+			Mashul:           printCmd.Mashul,
+			Weight:           printCmd.Weight,
 		}
 		printManager.handlePrintJob(printJob, console)
 		outgoinglog := OutGoingLog{JobID: printCmd.JobID, Event: "live-print-sent-to-printer", Message: "Live Print job sent to printer"}
@@ -976,17 +882,17 @@ func SpecimenPrint(console *Console, printManager *PrintManager, printCmd *Print
 	pdfData, err := downloadPDF("specimen-print", printCmd.JobID, printCmd.JobToken)
 	if err == nil {
 		printJob := PrintJob{
-			PrinterName: selectedPrinter,
+			PrinterName:      selectedPrinter,
 			PrintOrientation: printCmd.PrintOrientation,
-			Data:        pdfData,
-			Token:       "specimen-print",
-			Width:       printCmd.Width,
-			Height:      printCmd.Height,
-			JobID:       printCmd.JobID,
-			Event:       "specimen-print",
-			Barcode:     printCmd.Barcode,
-			Mashul:      printCmd.Mashul,
-			Weight:      printCmd.Weight,
+			Data:             pdfData,
+			Token:            "specimen-print",
+			Width:            printCmd.Width,
+			Height:           printCmd.Height,
+			JobID:            printCmd.JobID,
+			Event:            "specimen-print",
+			Barcode:          printCmd.Barcode,
+			Mashul:           printCmd.Mashul,
+			Weight:           printCmd.Weight,
 		}
 		printManager.handlePrintJob(printJob, console)
 		outgoinglog := OutGoingLog{JobID: printCmd.JobID, Event: "specimen-print-sent-to-printer", Message: "Specimen Print job sent to printer"}
@@ -998,142 +904,6 @@ func SpecimenPrint(console *Console, printManager *PrintManager, printCmd *Print
 		}
 		outgoinglog := OutGoingLog{JobID: printCmd.JobID, Event: "specimen-pdf-download-failed", Message: "Failed to download Specimen pdf"}
 		outgoingMessages <- outgoinglog
-	}
-}
-
-func (pm *PrintManager) attachPrintQueue(last_print_event LastPrintEvent, console *Console, last_print_event_found bool) {
-
-	if !last_print_event_found {
-		time.Sleep(3 * time.Second)
-	}
-
-	// selectedPrinter := printerList.Value // Ensure this is the correct printer name
-	// sanitizedPrinter := strings.ReplaceAll(selectedPrinter, " ", "%20")
-
-	// XML query for wevtutil (no time constraint, just print service logs)
-	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("Binding print queue for job: %s", last_print_event.JobID),
-		Color: colorNRGBA(0, 255, 255, 255), // Cyan
-	}
-	loop_count := 1
-	event_found := false
-
-	for {
-		time.Sleep(300 * time.Millisecond)
-
-		log.Println("Binding Loop Count: ", loop_count)
-
-		query_time := 3600000 * loop_count
-		if loop_count > 10 {
-			query_time = 360000000 * loop_count
-		}
-
-		// Generate a random integer between 0 and 9999 to not get cached query
-		query_time += mathrand.Intn(1000)
-
-		// console.MsgChan <- Message{
-		// 	Text:  fmt.Sprintf("Loop Count: %d", loop_count),
-		// 	Color: colorNRGBA(0, 255, 255, 255), // Cyan
-		// }
-
-		xmlQuery := fmt.Sprintf(`
-<QueryList>
-  <Query Id="0" Path="Microsoft-Windows-PrintService/Operational">
-    <Select Path="Microsoft-Windows-PrintService/Operational">*[System[Provider[@Name='Microsoft-Windows-PrintService'] and (Level=1  or Level=2 or Level=3 or Level=4 or Level=0) and ( Task = 11 or Task = 12 or Task = 14 or Task = 15 or Task = 22 or Task = 23 or Task = 24 or Task = 26 or Task = 27 or Task = 43 ) and TimeCreated[timediff(@SystemTime) &lt;= %d]]]</Select>
-  </Query>
-</QueryList>`, query_time)
-
-		// Run the wevtutil command to get the logs
-		cmd := exec.Command("wevtutil", "qe", "Microsoft-Windows-PrintService/Operational", "/q:"+xmlQuery, "/f:Text")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		// Capture the output
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			console.MsgChan <- Message{
-				Text: fmt.Sprintf("Failed to query print events: %v", err),
-				//bright pink color
-				Color: colorNRGBA(255, 105, 180, 255),
-			}
-		}
-
-		// log.Println("Output: ", string(output))
-
-		// If no events are returned, inform the user
-		if len(output) > 0 {
-
-			// Parse the logs
-			events, err := parsePrintServiceEvents(string(output))
-			if err != nil {
-				fmt.Println("Error:", err)
-
-			}
-
-			queue_id := 0
-			queue_time := time.Now()
-
-			previous_print_event_found := false
-			// Print the parsed events
-			for _, event := range events {
-
-				eventConstant, queueID, err := extractQueueIDAndEvent(event.Description)
-				if err != nil {
-					console.MsgChan <- Message{
-						Text:  fmt.Sprintf("Error extracting event type: %v", err),
-						Color: colorNRGBA(255, 40, 0, 255), // Red
-					}
-					continue
-				}
-
-				switch eventConstant {
-				case PRINT_EVENT_JOB_STARTED:
-					if last_print_event_found {
-						if queueID == last_print_event.QueueID && event.Date.Equal(last_print_event.QueueTime) {
-							previous_print_event_found = true
-						}
-						if previous_print_event_found && event.Date.After(last_print_event.QueueTime) {
-							queue_id = queueID
-							queue_time = event.Date
-						}
-					} else {
-
-						queue_id = queueID
-						queue_time = event.Date
-					}
-
-				}
-
-				if queue_id > 0 {
-
-					log.Printf("Attached Queue ID: %d, Attached Queue Time: %s , Job ID: %s", queue_id, queue_time, last_print_event.JobID)
-
-					found_print_event := PrintEvent{JobID: last_print_event.JobID, QueueID: queue_id, QueueTime: queue_time}
-					event_found = true
-					printEventTracker.Store(strconv.Itoa(queueID), found_print_event)
-					err := saveToEncryptedFile("data/evnts.bin", eck)
-					if err != nil {
-						log.Println("Error saving print event to file:", err)
-					}
-					console.MsgChan <- Message{
-						Text:  fmt.Sprintf("Print queue attached for job: %s, QueueID: %d", last_print_event.JobID, queue_id),
-						Color: colorNRGBA(0, 255, 255, 255), // Cyan
-					}
-
-					break
-				}
-			}
-
-		}
-		loop_count++
-		if loop_count > 20 || event_found {
-			if !event_found {
-				console.MsgChan <- Message{
-					Text:  fmt.Sprintf("Print queue not attached for job: %s", last_print_event.JobID),
-					Color: colorNRGBA(255, 40, 0, 255), // Red
-				}
-				outgoingMessages <- OutGoingLog{JobID: last_print_event.JobID, Event: "print-queue-not-attached", Message: "Print queue not attached"}
-			}
-			break
-		}
 	}
 }
 
@@ -1273,7 +1043,7 @@ func (pm *PrintManager) attachPrintQueueWithMonitoring(last_print_event LastPrin
 // monitorPrintProgress monitors Windows print queue and reports page progress
 func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jobID string, totalPages int, console *Console) {
 	log.Printf("Starting print progress monitor for Queue ID %d, Job %s", queueID, jobID)
-	
+
 	console.MsgChan <- Message{
 		Text:  fmt.Sprintf("Monitoring print progress for job %s (Queue ID: %d)", jobID, queueID),
 		Color: colorNRGBA(0, 255, 255, 255), // Cyan
@@ -1313,11 +1083,11 @@ func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jo
 		// First call to get required buffer size
 		procEnumJobs.Call(
 			uintptr(hPrinter),
-			0, // FirstJob
+			0,    // FirstJob
 			1000, // NoJobs (query up to 1000 jobs)
-			1, // Level (JOB_INFO_1)
-			0, // pJob (NULL to get size)
-			0, // cbBuf
+			1,    // Level (JOB_INFO_1)
+			0,    // pJob (NULL to get size)
+			0,    // cbBuf
 			uintptr(unsafe.Pointer(&bytesNeeded)),
 			uintptr(unsafe.Pointer(&jobCount)))
 
@@ -1386,8 +1156,8 @@ func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jo
 				}
 
 				// Check job status for completion or errors
-				if jobInfo.StatusCode&JOB_STATUS_PRINTED != 0 || 
-				   jobInfo.StatusCode&JOB_STATUS_DELETED != 0 {
+				if jobInfo.StatusCode&JOB_STATUS_PRINTED != 0 ||
+					jobInfo.StatusCode&JOB_STATUS_DELETED != 0 {
 					log.Printf("Job %d completed/deleted, stopping monitor", queueID)
 					jobCompleted = true
 					monitoringActive = false
@@ -1395,7 +1165,7 @@ func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jo
 				}
 
 				if jobInfo.StatusCode&JOB_STATUS_ERROR != 0 ||
-				   jobInfo.StatusCode&JOB_STATUS_USER_INTERVENTION != 0 {
+					jobInfo.StatusCode&JOB_STATUS_USER_INTERVENTION != 0 {
 					log.Printf("Job %d has error status: 0x%X, continuing to monitor", queueID, jobInfo.StatusCode)
 					// Don't stop monitoring on errors, job might recover
 				}
@@ -2031,17 +1801,18 @@ var (
 	procEndDoc           = gdi32.NewProc("EndDoc")
 	procStartPage        = gdi32.NewProc("StartPage")
 	procEndPage          = gdi32.NewProc("EndPage")
+	procGdiFlush         = gdi32.NewProc("GdiFlush")
 
 	// Winspool APIs for thermal printing and Brother cutting
-	procOpenPrinter      = winspool.NewProc("OpenPrinterW")
-	procClosePrinter     = winspool.NewProc("ClosePrinter")
-	procWritePrinter     = winspool.NewProc("WritePrinter")
-	procStartDocPrinter  = winspool.NewProc("StartDocPrinterW")
-	procEndDocPrinter    = winspool.NewProc("EndDocPrinter")
-	procStartPagePrinter = winspool.NewProc("StartPagePrinter")
-	procEndPagePrinter   = winspool.NewProc("EndPagePrinter")
+	procOpenPrinter        = winspool.NewProc("OpenPrinterW")
+	procClosePrinter       = winspool.NewProc("ClosePrinter")
+	procWritePrinter       = winspool.NewProc("WritePrinter")
+	procStartDocPrinter    = winspool.NewProc("StartDocPrinterW")
+	procEndDocPrinter      = winspool.NewProc("EndDocPrinter")
+	procStartPagePrinter   = winspool.NewProc("StartPagePrinter")
+	procEndPagePrinter     = winspool.NewProc("EndPagePrinter")
 	procDocumentProperties = winspool.NewProc("DocumentPropertiesW")
-	
+
 	// Print queue monitoring APIs
 	procEnumJobs = winspool.NewProc("EnumJobsW")
 )
@@ -2083,19 +1854,19 @@ type DOCINFO struct {
 
 // JOB_INFO_1 structure for Windows print queue monitoring
 type JOB_INFO_1 struct {
-	JobId              uint32
-	PrinterName        *uint16
-	MachineName        *uint16
-	UserName           *uint16
-	Document           *uint16
-	Datatype           *uint16
-	Status             *uint16
-	StatusCode         uint32
-	Priority           uint32
-	Position           uint32
-	TotalPages         uint32
-	PagesPrinted       uint32
-	Submitted          syscall.Filetime
+	JobId        uint32
+	PrinterName  *uint16
+	MachineName  *uint16
+	UserName     *uint16
+	Document     *uint16
+	Datatype     *uint16
+	Status       *uint16
+	StatusCode   uint32
+	Priority     uint32
+	Position     uint32
+	TotalPages   uint32
+	PagesPrinted uint32
+	Submitted    syscall.Filetime
 }
 
 // Structures removed - using simplified approach without complex document setup
@@ -2130,7 +1901,7 @@ const (
 	MM_TWIPS       = 6 // 1/1440 inch units
 	MM_ISOTROPIC   = 7 // Arbitrary units with equal X and Y scaling
 	MM_ANISOTROPIC = 8 // Arbitrary units with independent X and Y scaling
-	
+
 	// Print job status codes
 	JOB_STATUS_PAUSED            = 0x00000001
 	JOB_STATUS_ERROR             = 0x00000002
