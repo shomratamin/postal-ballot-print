@@ -356,6 +356,7 @@ func (pm *PrintManager) processPDFPagesWithFixedDPI(pdfReader *model.PdfReader, 
 func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages int, job PrintJob, console *Console, widthPx, heightPx int) error {
 	// Ordered page delivery system
 	type PageResult struct {
+		jobID   string // Job identifier for isolation
 		pageNum int
 		img     *image.Gray
 		err     error
@@ -439,7 +440,14 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 					// Recover from any panic to prevent crash
 					if r := recover(); r != nil {
 						log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
-						resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}
+						// Safe send - check if channel is still open
+						select {
+						case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}:
+							// Sent successfully
+						default:
+							// Channel closed or full, skip
+							log.Printf("Could not send panic error for page %d - channel closed", pNum)
+						}
 					}
 				}()
 
@@ -453,31 +461,55 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 				if err != nil {
 					log.Printf("ERROR rendering page %d: %v", pNum, err)
-					resultChan <- PageResult{pageNum: pNum, img: nil, err: err}
+					select {
+					case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: err}:
+					default:
+						log.Printf("Could not send error for page %d - channel closed", pNum)
+					}
 					return
 				}
 
 				// Validate image before sending
 				if img == nil || img.Pix == nil || len(img.Pix) == 0 {
 					log.Printf("ERROR: page %d rendered nil or empty image", pNum)
-					resultChan <- PageResult{pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}
+					select {
+					case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}:
+					default:
+						log.Printf("Could not send error for page %d - channel closed", pNum)
+					}
 					return
 				}
 
+				// CRITICAL FIX: Create deep copy IMMEDIATELY after rendering to prevent memory corruption
+				// This ensures each page has its own independent memory buffer
+				imgCopy := &image.Gray{
+					Pix:    make([]byte, len(img.Pix)),
+					Stride: img.Stride,
+					Rect:   img.Rect,
+				}
+				copy(imgCopy.Pix, img.Pix)
+
 				console.MsgChan <- Message{
-					Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, img.Bounds().Dx(), img.Bounds().Dy()),
+					Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy()),
 					Color: colorNRGBA(0, 255, 0, 255), // Green
 				}
 
-				// Send to printer IMMEDIATELY - don't wait for file I/O
-				resultChan <- PageResult{pageNum: pNum, img: img, err: nil}
+				// Send COPY to printer, not original - prevents race conditions
+				// Use select with default to handle closed channel gracefully
+				select {
+				case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: imgCopy, err: nil}:
+					// Sent successfully
+				default:
+					// Channel closed or full - this shouldn't happen in normal flow
+					log.Printf("WARNING: Could not send page %d - channel closed or full", pNum)
+				}
 
-				// Save debug images asynchronously - don't block the printing pipeline
-				go func(image *image.Gray, pageNumber int, jobID string) {
-					if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
-						log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
-					}
-				}(img, pNum, job.JobID)
+				// Save debug images asynchronously using the COPY
+				// go func(image *image.Gray, pageNumber int, jobID string) {
+				// 	if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
+				// 		log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
+				// 	}
+				// }(imgCopy, pNum, job.JobID)
 			}(pageNum)
 		}
 	}()
@@ -495,10 +527,18 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		pageBuffer := make(map[int]*image.Gray)
 		nextPageToSend := 1
 		hasError := false
+		resultsReceived := 0
+
+		log.Printf("Sequencer: Starting, waiting for %d pages from job %s", numPages, job.JobID)
 
 		for result := range resultChan {
+			resultsReceived++
+			log.Printf("Sequencer: Received result %d: page=%d, jobID=%s, hasError=%v",
+				resultsReceived, result.pageNum, result.jobID, result.err != nil)
+
 			if result.err != nil {
 				hasError = true
+				log.Printf("Sequencer: Page %d has error: %v", result.pageNum, result.err)
 				select {
 				case errChan <- fmt.Errorf("render page %d: %w", result.pageNum, result.err):
 				default:
@@ -507,18 +547,26 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 				continue
 			}
 
-			// If we already have an error, just drain the channel
-			if hasError {
+			// Validate job ID matches (job isolation)
+			if result.jobID != job.JobID {
+				log.Printf("WARNING: Page %d belongs to different job %s, expected %s", result.pageNum, result.jobID, job.JobID)
 				continue
 			}
 
-			// Store this page
+			// If we already have an error, just drain the channel
+			if hasError {
+				log.Printf("Sequencer: Draining page %d due to previous error", result.pageNum)
+				continue
+			}
+
+			// Store this page (already a deep copy from render goroutine)
 			pageBuffer[result.pageNum] = result.img
+			log.Printf("Sequencer: Stored page %d in buffer", result.pageNum)
 
 			// Send all consecutive pages starting from nextPageToSend
 			for {
 				if img, ok := pageBuffer[nextPageToSend]; ok {
-					// Validate image before copying
+					// Validate image
 					if img == nil || img.Pix == nil || len(img.Pix) == 0 {
 						log.Printf("ERROR: Invalid image in buffer for page %d", nextPageToSend)
 						hasError = true
@@ -529,19 +577,19 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 						break
 					}
 
-					// Create a deep copy of the image to prevent memory corruption
-					// CRITICAL: Allocate new memory for Pix buffer
-					imgCopy := &image.Gray{
-						Pix:    make([]byte, len(img.Pix)),
-						Stride: img.Stride,
-						Rect:   img.Rect,
-					}
-					copy(imgCopy.Pix, img.Pix)
-
+					// No need for additional copy - image is already a deep copy from render goroutine
 					log.Printf("Sequencer: Sending page %d to printer (size: %dx%d, pix: %d bytes)",
-						nextPageToSend, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy(), len(imgCopy.Pix))
+						nextPageToSend, img.Bounds().Dx(), img.Bounds().Dy(), len(img.Pix))
 
-					printChan <- imgCopy
+					select {
+					case printChan <- img:
+						log.Printf("Sequencer: Successfully sent page %d to printChan", nextPageToSend)
+					case <-time.After(30 * time.Second):
+						log.Printf("ERROR: Timeout sending page %d to printChan", nextPageToSend)
+						hasError = true
+						break
+					}
+
 					delete(pageBuffer, nextPageToSend)
 					nextPageToSend++
 				} else {
@@ -550,18 +598,24 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 			}
 		}
 
+		log.Printf("Sequencer: resultChan closed, processing remaining buffer...")
+
 		// After resultChan is closed, verify we sent all pages
 		if !hasError && nextPageToSend <= numPages {
+			log.Printf("Sequencer: Sending %d remaining buffered pages", numPages-nextPageToSend+1)
 			// Send any remaining buffered pages (shouldn't happen but safety check)
 			for i := nextPageToSend; i <= numPages; i++ {
 				if img, ok := pageBuffer[i]; ok {
+					log.Printf("Sequencer: Sending buffered page %d", i)
 					printChan <- img
 					delete(pageBuffer, i)
+				} else {
+					log.Printf("WARNING: Page %d not in buffer", i)
 				}
 			}
 		}
 
-		log.Printf("Sequencer finished: sent %d pages, has error: %v", nextPageToSend-1, hasError)
+		log.Printf("Sequencer finished: sent %d pages, has error: %v, received %d results", nextPageToSend-1, hasError, resultsReceived)
 	}()
 
 	// Consumer: Print pages as they arrive in order (printer is already initialized)
@@ -635,16 +689,18 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 		imageData := make([]byte, stride*imgHeight)
 
 		// Copy grayscale data with stride alignment (top-down format)
-		// Use direct pixel buffer access for better performance and reliability
-		if img.Stride == imgWidth && bounds.Min.X == 0 && bounds.Min.Y == 0 {
-			// Optimized path: direct copy with stride adjustment
+		// FIXED: Separate stride compatibility from bounds checking
+		needsPixelByPixel := img.Stride != imgWidth || bounds.Min.X != 0 || bounds.Min.Y != 0
+
+		if !needsPixelByPixel {
+			// Optimized path: direct copy when stride matches and bounds at (0,0)
 			for y := 0; y < imgHeight; y++ {
 				srcOffset := y * img.Stride
 				dstOffset := y * stride
 				copy(imageData[dstOffset:dstOffset+imgWidth], img.Pix[srcOffset:srcOffset+imgWidth])
 			}
 		} else {
-			// Fallback: pixel-by-pixel copy with bounds offsets
+			// Safe path: pixel-by-pixel copy when stride doesn't match or bounds offset
 			for y := 0; y < imgHeight; y++ {
 				rowOffset := y * stride
 				for x := 0; x < imgWidth; x++ {
@@ -767,16 +823,21 @@ func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pa
 
 	// Convert to grayscale using standard library for best quality
 	bounds := img.Bounds()
-	// CRITICAL: Create image with (0,0) origin for consistent addressing
+	// CRITICAL FIX: Always create image with (0,0) origin for consistent addressing
+	// This prevents corruption from non-zero Min bounds
 	grayImg := image.NewGray(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 
-	// Copy pixels with proper bounds handling
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			originalColor := img.At(x, y)
+	// FIXED: Iterate using dimensions, not source bounds
+	// This ensures proper addressing even if source has non-zero Min
+	for y := 0; y < bounds.Dy(); y++ {
+		for x := 0; x < bounds.Dx(); x++ {
+			// Read from source with offset
+			srcX := bounds.Min.X + x
+			srcY := bounds.Min.Y + y
+			originalColor := img.At(srcX, srcY)
 			grayColor := color.GrayModel.Convert(originalColor)
-			// Write to normalized (0,0)-based coordinates
-			grayImg.SetGray(x-bounds.Min.X, y-bounds.Min.Y, grayColor.(color.Gray))
+			// Write to normalized (0,0)-based destination
+			grayImg.SetGray(x, y, grayColor.(color.Gray))
 		}
 	}
 

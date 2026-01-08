@@ -163,10 +163,10 @@ func downloadPDF(command string, job_id string, job_token string) ([]byte, error
 		return nil, fmt.Errorf("failed to read PDF data: %v", err)
 	}
 	//save pdf to out folder for testing
-	err = os.WriteFile("out/downloaded.pdf", data, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to save downloaded PDF: %v", err)
-	}
+	// err = os.WriteFile("out/downloaded.pdf", data, 0644)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to save downloaded PDF: %v", err)
+	// }
 
 	return data, nil
 }
