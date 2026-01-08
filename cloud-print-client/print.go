@@ -256,6 +256,10 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 		Color: colorNRGBA(0, 255, 0, 255), // Green
 	}
 
+	// CRITICAL: Reset printer state to prevent subsequent prints from corrupting
+	// This ensures the printer driver is left in a clean state for next job
+	pm.resetPrinterState(job.PrinterName, console)
+
 	// Bind print queue for event tracking and start progress monitoring
 	pm.attachPrintQueueWithMonitoring(last_print_event, console, last_print_event_found, job.PrinterName, numPages)
 
@@ -620,17 +624,27 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 	// Consumer: Print pages as they arrive in order (printer is already initialized)
 	log.Printf("About to call printer consumer function...")
-	if err := pm.printPagesFromChannel(printChan, errChan, numPages, hDC, pageWidthPx, console); err != nil {
-		return err
-	}
+	printErr := pm.printPagesFromChannel(printChan, errChan, numPages, hDC, pageWidthPx, console)
 
 	// Check for rendering errors
 	select {
-	case err := <-errChan:
-		return err
+	case renderErr := <-errChan:
+		log.Printf("Rendering error occurred: %v, calling AbortDoc to reset printer state", renderErr)
+		procAbortDoc.Call(hDC)
+		return renderErr
 	default:
-		return nil
+		// No rendering error, check print error
+		if printErr != nil {
+			log.Printf("Print error occurred: %v, calling AbortDoc to reset printer state", printErr)
+			procAbortDoc.Call(hDC)
+			return printErr
+		}
 	}
+
+	// SUCCESS: Document completed successfully
+	// EndDoc will be called by defer, and then DeleteDC
+	log.Printf("Print job completed successfully, EndDoc will finalize document")
+	return nil
 }
 
 // printPagesFromChannel prints pages from channel - printer DC already initialized
@@ -781,7 +795,14 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 	// CRITICAL: Final flush and wait before ending document
 	// The spooler must have time to process all pages before EndDoc is called
+	log.Printf("All pages sent, flushing GDI commands...")
 	procGdiFlush.Call()
+
+	// CRITICAL: Verify all pages were sent
+	if pageNum != numPages {
+		log.Printf("ERROR: Expected %d pages but only sent %d", numPages, pageNum)
+		return fmt.Errorf("incomplete print job: sent %d/%d pages", pageNum, numPages)
+	}
 
 	// Wait for spooler to catch up - essential for multi-page documents
 	// Without this, EndDoc may abort pages still being processed
@@ -793,7 +814,7 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 		Color: colorNRGBA(0, 255, 0, 255), // Green
 	}
 
-	log.Printf("All pages sent, calling EndDoc")
+	log.Printf("PrintPagesFromChannel complete - EndDoc will be called by defer")
 	return nil
 }
 
@@ -870,6 +891,41 @@ func saveRenderedImageForDebug(img *image.Gray, pageNum int, jobID string) error
 
 	log.Printf("Saved debug image: %s", outputPath)
 	return nil
+}
+
+// resetPrinterState ensures the printer driver is properly reset after a print job
+// This prevents the printer from being left in a corrupted state that causes garbage output
+func (pm *PrintManager) resetPrinterState(printerName string, console *Console) {
+	log.Printf("Resetting printer state for: %s", printerName)
+
+	// Create a temporary printer DC and immediately close it
+	// This forces the driver to reset its internal state
+	printerNamePtr, _ := syscall.UTF16PtrFromString(printerName)
+	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
+
+	hDC, _, _ := procCreateDC.Call(
+		uintptr(unsafe.Pointer(winspool16Ptr)),
+		uintptr(unsafe.Pointer(printerNamePtr)),
+		0, 0)
+
+	if hDC != 0 {
+		// Flush any pending GDI operations
+		procGdiFlush.Call()
+
+		// Close the DC to reset the printer driver
+		procDeleteDC.Call(hDC)
+
+		// Give the driver time to reset
+		time.Sleep(100 * time.Millisecond)
+
+		log.Printf("Printer state reset completed for: %s", printerName)
+	} else {
+		log.Printf("Warning: Could not create DC for printer state reset: %s", printerName)
+		console.MsgChan <- Message{
+			Text:  fmt.Sprintf("Warning: Could not reset printer state for %s", printerName),
+			Color: colorNRGBA(255, 165, 0, 255), // Orange
+		}
+	}
 }
 
 func getNowTime() string {
@@ -1860,6 +1916,7 @@ var (
 	procSetViewportExtEx = gdi32.NewProc("SetViewportExtEx")
 	procStartDoc         = gdi32.NewProc("StartDocW")
 	procEndDoc           = gdi32.NewProc("EndDoc")
+	procAbortDoc         = gdi32.NewProc("AbortDoc")
 	procStartPage        = gdi32.NewProc("StartPage")
 	procEndPage          = gdi32.NewProc("EndPage")
 	procGdiFlush         = gdi32.NewProc("GdiFlush")
