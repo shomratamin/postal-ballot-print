@@ -75,13 +75,16 @@ type AppSettingsData struct {
 
 func NewAppSettings() *AppSettings {
 	return &AppSettings{
-		PUBLIC_KEY_URL:   "http://192.168.1.18:8000/sso/fetch-public-key/",
-		TEST_PDF_URL:     "https://mdm.smartpostbd.com/files/combined.pdf",
-		LIVE_PDf_URL:     "http://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
-		SPECIMEN_PDF_URL: "http://election2026.ekdak.com/v1/api/print/envelope-pdf-specimen-generator/",
-		INTERNAL_PDF_URL: "http://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
-		SOCKET_URL:       "wss://election2026.ekdak.com/v1/ws",
-		// SOCKET_URL:        "ws://192.168.1.18:8056/ws",
+		PUBLIC_KEY_URL: "http://192.168.1.18:8000/sso/fetch-public-key/",
+		TEST_PDF_URL:   "https://mdm.smartpostbd.com/files/combined.pdf",
+		// LIVE_PDf_URL:     "http://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
+		// SPECIMEN_PDF_URL: "http://election2026.ekdak.com/v1/api/print/envelope-pdf-specimen-generator/",
+		// INTERNAL_PDF_URL: "http://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
+		// SOCKET_URL:       "wss://election2026.ekdak.com/v1/ws",
+		LIVE_PDf_URL:      "http://192.168.1.18:8056/api/print/envelope-pdf-generator/",
+		SPECIMEN_PDF_URL:  "http://192.168.1.18:8056/api/print/envelope-pdf-specimen-generator/",
+		INTERNAL_PDF_URL:  "http://192.168.1.18:8056/api/print/envelope-pdf-generator/",
+		SOCKET_URL:        "ws://192.168.1.18:8056/ws",
 		WT_DIM_MACHINE_ID: "",
 		CAMERA_ID:         "",
 		// Auto-update settings with defaults
