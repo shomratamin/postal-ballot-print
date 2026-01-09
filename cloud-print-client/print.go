@@ -210,34 +210,33 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 	}
 
 	// Process with our new UniPDF method
-	err, numPages := pm.processWithUniPDF(job, console)
-	// gsPath := "./bin/gswin64c.exe" // Update with your Ghostscript path
+	// err, numPages := pm.processWithUniPDF(job, console)
+	gsPath := "./bin/gswin64c.exe" // Update with your Ghostscript path
 
-	// // Ghostscript command to set paper size and DPI in portrait mode
-	// cmd := exec.Command(
-	// 	gsPath,
-	// 	"-dBATCH",           // Exit after processing
-	// 	"-dNOPAUSE",         // Don't pause between pages
-	// 	"-dQUIET",           // Suppress normal output
-	// 	"-sDEVICE=mswinpr2", // Use Windows printer device
-	// 	"-sOutputFile=%printer%"+job.PrinterName,                   // Output to the specified printer
-	// 	"-dDEVICEWIDTHPOINTS="+fmt.Sprintf("%.2f", job.Width*72),   // Width in points (72 points per inch)
-	// 	"-dDEVICEHEIGHTPOINTS="+fmt.Sprintf("%.2f", job.Height*72), // Height in points
-	// 	"-r300",             // Set DPI to 300
-	// 	"-dFIXEDMEDIA",      // Fix media size (avoid scaling)
-	// 	"-dPDFFitPage",      // Fit the PDF to the page size
-	// 	"-c", "<</Orientation 0>> setpagedevice", // 0=portrait, 1=landscape
-	// 	"-f", "-",           // Read from stdin after executing commands
-	// )
+	// Ghostscript command to set paper size and DPI in portrait mode
+	cmd := exec.Command(
+		gsPath,
+		"-dBATCH",           // Exit after processing
+		"-dNOPAUSE",         // Don't pause between pages
+		"-dQUIET",           // Suppress normal output
+		"-sDEVICE=mswinpr2", // Use Windows printer device
+		"-sOutputFile=%printer%"+job.PrinterName,                   // Output to the specified printer
+		"-dDEVICEWIDTHPOINTS="+fmt.Sprintf("%.2f", job.Width*72),   // Width in points (72 points per inch)
+		"-dDEVICEHEIGHTPOINTS="+fmt.Sprintf("%.2f", job.Height*72), // Height in points
+		"-r150",        // Set DPI to 300
+		"-dFIXEDMEDIA", // Fix media size (avoid scaling)
+		"-dPDFFitPage", // Fit the PDF to the page size
+		"-f", "-",      // Read from stdin after executing commands
+	)
 
-	// // Set the input data as the standard input for the command
-	// cmd.Stdin = bytes.NewReader(job.Data)
+	// Set the input data as the standard input for the command
+	cmd.Stdin = bytes.NewReader(job.Data)
 
-	// // Suppress console window when executing Ghostscript
-	// cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// Suppress console window when executing Ghostscript
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
-	// // Run the command
-	// err := cmd.Run()
+	// Run the command
+	err := cmd.Run()
 
 	query_auto_print_log = true
 
@@ -258,10 +257,10 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 
 	// CRITICAL: Reset printer state to prevent subsequent prints from corrupting
 	// This ensures the printer driver is left in a clean state for next job
-	pm.resetPrinterState(job.PrinterName, console)
+	// pm.resetPrinterState(job.PrinterName, console)
 
 	// Bind print queue for event tracking and start progress monitoring
-	pm.attachPrintQueueWithMonitoring(last_print_event, console, last_print_event_found, job.PrinterName, numPages)
+	pm.attachPrintQueueWithMonitoring(last_print_event, console, last_print_event_found, job.PrinterName, 1)
 
 	if job.Event == "live-print" || job.Event == "specimen-print" {
 		now_time := getNowTime()
@@ -678,10 +677,29 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 			return fmt.Errorf("page %d: received nil image from channel", pageNum)
 		}
 
+		// CRITICAL: Validate image has valid pixel data
+		if img.Pix == nil || len(img.Pix) == 0 {
+			log.Printf("ERROR: Page %d has nil or empty Pix buffer", pageNum)
+			return fmt.Errorf("page %d: image has no pixel data", pageNum)
+		}
+
 		// Get image dimensions - ensure we use actual bounds not min/max
 		bounds := img.Bounds()
 		imgWidth := bounds.Dx()
 		imgHeight := bounds.Dy()
+
+		// CRITICAL: Validate dimensions are positive
+		if imgWidth <= 0 || imgHeight <= 0 {
+			log.Printf("ERROR: Page %d has invalid dimensions: %dx%d", pageNum, imgWidth, imgHeight)
+			return fmt.Errorf("page %d: invalid dimensions %dx%d", pageNum, imgWidth, imgHeight)
+		}
+
+		// CRITICAL: Validate Pix buffer has expected size
+		expectedSize := img.Stride * imgHeight
+		if len(img.Pix) < expectedSize {
+			log.Printf("ERROR: Page %d Pix buffer too small: have %d, need %d", pageNum, len(img.Pix), expectedSize)
+			return fmt.Errorf("page %d: Pix buffer too small", pageNum)
+		}
 
 		log.Printf("Page %d: Received image %dpx x %dpx (bounds: %v)", pageNum, imgWidth, imgHeight, bounds)
 
@@ -706,11 +724,24 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 		// FIXED: Separate stride compatibility from bounds checking
 		needsPixelByPixel := img.Stride != imgWidth || bounds.Min.X != 0 || bounds.Min.Y != 0
 
+		log.Printf("Page %d: Copy strategy - needsPixelByPixel=%v, imgStride=%d, imgWidth=%d, bounds.Min=(%d,%d)",
+			pageNum, needsPixelByPixel, img.Stride, imgWidth, bounds.Min.X, bounds.Min.Y)
+
 		if !needsPixelByPixel {
 			// Optimized path: direct copy when stride matches and bounds at (0,0)
+			// CRITICAL: Validate we have enough source data
+			if len(img.Pix) < img.Stride*imgHeight {
+				log.Printf("ERROR: Insufficient source data for direct copy on page %d", pageNum)
+				return fmt.Errorf("page %d: insufficient source pixel data", pageNum)
+			}
 			for y := 0; y < imgHeight; y++ {
 				srcOffset := y * img.Stride
 				dstOffset := y * stride
+				// CRITICAL: Bounds check before copy
+				if srcOffset+imgWidth > len(img.Pix) {
+					log.Printf("ERROR: Page %d row %d would read past buffer end", pageNum, y)
+					return fmt.Errorf("page %d: buffer overrun at row %d", pageNum, y)
+				}
 				copy(imageData[dstOffset:dstOffset+imgWidth], img.Pix[srcOffset:srcOffset+imgWidth])
 			}
 		} else {
@@ -726,6 +757,23 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		log.Printf("Page %d: DIB created - stride=%d, imgStride=%d, dataSize=%d",
 			pageNum, stride, img.Stride, len(imageData))
+
+		// CRITICAL: Validate imageData was actually populated (not all zeros)
+		hasData := false
+		for i := 0; i < len(imageData) && i < 1000; i++ {
+			if imageData[i] != 0 {
+				hasData = true
+				break
+			}
+		}
+		if !hasData {
+			log.Printf("WARNING: Page %d imageData appears to be all zeros (blank)", pageNum)
+			// Don't fail - might be a legitimately blank page, but log it
+		}
+
+		// CRITICAL: Add memory barrier to ensure all data is written before GDI reads it
+		runtime.KeepAlive(img)
+		runtime.KeepAlive(imageData)
 
 		// Create bitmap info with 256-color grayscale palette
 		paletteSize := 256
@@ -752,6 +800,17 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 			bmi.BmiColors[i].RgbReserved = 0
 		}
 
+		// CRITICAL: Validate bitmap info is correct
+		if bmi.BmiHeader.BiSizeImage != uint32(stride*imgHeight) {
+			log.Printf("ERROR: BiSizeImage mismatch: %d != %d", bmi.BmiHeader.BiSizeImage, stride*imgHeight)
+		}
+
+		// CRITICAL: Ensure all data structures are fully written before syscall
+		runtime.KeepAlive(bmi)
+		runtime.KeepAlive(imageData)
+
+		log.Printf("Page %d: Calling StretchDIBits with %d bytes of image data", pageNum, len(imageData))
+
 		// Print the image - pass pointer to entire BMI structure (includes palette)
 		ret, _, err = procStretchDIBits.Call(
 			hDC,
@@ -770,11 +829,16 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		// StretchDIBits returns scan lines on success, GDI_ERROR on failure
 		if int32(ret) == -1 {
+			log.Printf("ERROR: StretchDIBits failed for page %d", pageNum)
 			return fmt.Errorf("failed to StretchDIBits for page %d: %v", pageNum, err)
 		}
 
-		// CRITICAL: Flush GDI before ending page to ensure drawing is complete
+		log.Printf("Page %d: StretchDIBits returned %d scan lines", pageNum, ret)
+
+		// CRITICAL: Flush GDI and wait to ensure all drawing commands are processed
+		// Ricoh printers need more time to process complex graphics
 		procGdiFlush.Call()
+		time.Sleep(50 * time.Millisecond) // Extra delay for slower printers
 
 		// End page - CRITICAL: Must complete before moving to next page
 		ret, _, err = procEndPage.Call(hDC)
@@ -782,8 +846,9 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 			return fmt.Errorf("failed to end page %d: %v", pageNum, err)
 		}
 
-		// Small delay between pages to prevent overwhelming the spooler
-		time.Sleep(100 * time.Millisecond)
+		// CRITICAL: Increased delay between pages for Ricoh printers
+		// They need more time to process each page in the spooler
+		time.Sleep(150 * time.Millisecond)
 
 		console.MsgChan <- Message{
 			Text:  fmt.Sprintf("✓ Page %d/%d printed successfully", pageNum, numPages),
