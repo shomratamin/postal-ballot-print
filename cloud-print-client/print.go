@@ -216,14 +216,23 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 	// Ghostscript command to set paper size and DPI in portrait mode
 	cmd := exec.Command(
 		gsPath,
-		"-dBATCH",           // Exit after processing
-		"-dNOPAUSE",         // Don't pause between pages
+		"-dBATCH",                  // Exit after processing
+		"-dNOPAUSE",                // Don't pause between pages
+		"-dNOSAFER",                // Disable SAFER mode for local printing
+		"-dNumRenderingThreads=14", // USE CPU CORES
+		"-dUseFastColor=true",
+		"-dGraphicsAlphaBits=2",
+		"-dTextAlphaBits=2",
+
+		// Memory (BIG SPEED GAIN)
+		"-dBandBufferSpace=512m",
+		"-dBufferSpace=2g",
 		"-dQUIET",           // Suppress normal output
 		"-sDEVICE=mswinpr2", // Use Windows printer device
 		"-sOutputFile=%printer%"+job.PrinterName,                   // Output to the specified printer
 		"-dDEVICEWIDTHPOINTS="+fmt.Sprintf("%.2f", job.Width*72),   // Width in points (72 points per inch)
 		"-dDEVICEHEIGHTPOINTS="+fmt.Sprintf("%.2f", job.Height*72), // Height in points
-		"-r150",        // Set DPI to 300
+		"-r300",        // Set DPI to 300
 		"-dFIXEDMEDIA", // Fix media size (avoid scaling)
 		"-dPDFFitPage", // Fit the PDF to the page size
 		"-f", "-",      // Read from stdin after executing commands
