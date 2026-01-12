@@ -210,42 +210,43 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 	}
 
 	// Process with our new UniPDF method
-	// err, numPages := pm.processWithUniPDF(job, console)
-	gsPath := "./bin/gswin64c.exe" // Update with your Ghostscript path
+	err, numPages := pm.processWithUniPDF(job, console)
+	// gsPath := "./bin/gswin64c.exe" // Update with your Ghostscript path
 
-	// Ghostscript command to set paper size and DPI in portrait mode
-	cmd := exec.Command(
-		gsPath,
-		"-dBATCH",                  // Exit after processing
-		"-dNOPAUSE",                // Don't pause between pages
-		"-dNOSAFER",                // Disable SAFER mode for local printing
-		"-dNumRenderingThreads=14", // USE CPU CORES
-		"-dUseFastColor=true",
-		"-dGraphicsAlphaBits=2",
-		"-dTextAlphaBits=2",
+	// // Ghostscript command to set paper size and DPI in portrait mode
+	// cmd := exec.Command(
+	// 	gsPath,
+	// 	"-dBATCH",                  // Exit after processing
+	// 	"-dNOPAUSE",                // Don't pause between pages
+	// 	"-dNOSAFER",                // Disable SAFER mode for local printing
+	// 	"-dNumRenderingThreads=14", // USE CPU CORES
+	// 	"-dUseFastColor=true",
+	// 	"-dGraphicsAlphaBits=2",
+	// 	"-dTextAlphaBits=2",
+	// 	"-dUseStdinJobName=false",
 
-		// Memory (BIG SPEED GAIN)
-		"-dBandBufferSpace=512m",
-		"-dBufferSpace=2g",
-		"-dQUIET",           // Suppress normal output
-		"-sDEVICE=mswinpr2", // Use Windows printer device
-		"-sOutputFile=%printer%"+job.PrinterName,                   // Output to the specified printer
-		"-dDEVICEWIDTHPOINTS="+fmt.Sprintf("%.2f", job.Width*72),   // Width in points (72 points per inch)
-		"-dDEVICEHEIGHTPOINTS="+fmt.Sprintf("%.2f", job.Height*72), // Height in points
-		"-r300",        // Set DPI to 300
-		"-dFIXEDMEDIA", // Fix media size (avoid scaling)
-		"-dPDFFitPage", // Fit the PDF to the page size
-		"-f", "-",      // Read from stdin after executing commands
-	)
+	// 	// Memory (BIG SPEED GAIN)
+	// 	"-dBandBufferSpace=512m",
+	// 	"-dBufferSpace=2g",
+	// 	"-dQUIET",           // Suppress normal output
+	// 	"-sDEVICE=mswinpr2", // Use Windows printer device
+	// 	"-sOutputFile=%printer%"+job.PrinterName,                   // Output to the specified printer
+	// 	"-dDEVICEWIDTHPOINTS="+fmt.Sprintf("%.2f", job.Width*72),   // Width in points (72 points per inch)
+	// 	"-dDEVICEHEIGHTPOINTS="+fmt.Sprintf("%.2f", job.Height*72), // Height in points
+	// 	"-r150",        // Set DPI to 150
+	// 	"-dFIXEDMEDIA", // Fix media size (avoid scaling)
+	// 	"-dPDFFitPage", // Fit the PDF to the page size
+	// 	"-f", "-",      // Read from stdin after executing commands
+	// )
 
-	// Set the input data as the standard input for the command
-	cmd.Stdin = bytes.NewReader(job.Data)
+	// // Set the input data as the standard input for the command
+	// cmd.Stdin = bytes.NewReader(job.Data)
 
-	// Suppress console window when executing Ghostscript
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// // Suppress console window when executing Ghostscript
+	// cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
-	// Run the command
-	err := cmd.Run()
+	// // Run the command
+	// err := cmd.Run()
 
 	query_auto_print_log = true
 
@@ -264,12 +265,11 @@ func (pm *PrintManager) processPrintJob(job PrintJob, console *Console) {
 		Color: colorNRGBA(0, 255, 0, 255), // Green
 	}
 
-	// CRITICAL: Reset printer state to prevent subsequent prints from corrupting
-	// This ensures the printer driver is left in a clean state for next job
-	// pm.resetPrinterState(job.PrinterName, console)
+	// Printer resources are properly released by deferred cleanup in print function
+	// No need for additional reset - proper defer sequence ensures clean state
 
 	// Bind print queue for event tracking and start progress monitoring
-	pm.attachPrintQueueWithMonitoring(last_print_event, console, last_print_event_found, job.PrinterName, 1)
+	pm.attachPrintQueueWithMonitoring(last_print_event, console, last_print_event_found, job.PrinterName, numPages)
 
 	if job.Event == "live-print" || job.Event == "specimen-print" {
 		now_time := getNowTime()
@@ -307,47 +307,18 @@ func (pm *PrintManager) processWithUniPDF(job PrintJob, console *Console) (error
 }
 
 // processPDFPagesInMemory processes PDF pages entirely in memory with proper size calculation
+// CRITICAL: Use fixed DPI to avoid unnecessary HDC calls that can block printer driver
 func (pm *PrintManager) processPDFPagesInMemory(pdfReader *model.PdfReader, numPages int, job PrintJob, console *Console) error {
-	// Regular printers: render at printer's native DPI capability
-	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
-	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
-	hDC, _, _ := procCreateDC.Call(
-		uintptr(unsafe.Pointer(winspool16Ptr)),
-		uintptr(unsafe.Pointer(printerNamePtr)),
-		0, 0)
-	if hDC == 0 {
-		console.MsgChan <- Message{
-			Text:  "Warning: Could not get printer DC for sizing, using 300 DPI fallback",
-			Color: colorNRGBA(255, 165, 0, 255), // Orange
-		}
-		// Fallback to 300 DPI calculation
-		dpi := 300
-		widthPx := int(job.Width * float64(dpi))
-		heightPx := int(job.Height * float64(dpi))
-		console.MsgChan <- Message{
-			Text: fmt.Sprintf("Fallback: rendering at fixed 300 DPI (%dpx x %dpx for %.1f\" x %.1f\")",
-				widthPx, heightPx, job.Width, job.Height),
-			Color: colorNRGBA(0, 255, 255, 255), // Cyan
-		}
-		return pm.processPDFPagesWithFixedDPI(pdfReader, numPages, job, console, widthPx, heightPx)
-	}
-	defer procDeleteDC.Call(hDC)
-
-	// Get actual printer DPI and render at native DPI
-	printerDpiX, _, _ := procGetDeviceCaps.Call(hDC, LOGPIXELSX)
-	printerDpiY, _, _ := procGetDeviceCaps.Call(hDC, LOGPIXELSY)
-
-	// Calculate target print size in pixels using actual printer DPI
-	// job.Width and job.Height are in inches
-	widthPx := int(job.Width * float64(printerDpiX))
-	heightPx := int(job.Height * float64(printerDpiY))
-
+	// Use 300 DPI for better quality to capture fine details like QR codes
+	// Higher DPI ensures embedded images and small graphics are properly rendered
+	dpi := 200
+	widthPx := int(job.Width * float64(dpi))
+	heightPx := int(job.Height * float64(dpi))
 	console.MsgChan <- Message{
-		Text: fmt.Sprintf("Regular printer: rendering at native DPI %dx%d (%dpx x %dpx for %.1f\" x %.1f\")",
-			printerDpiX, printerDpiY, widthPx, heightPx, job.Width, job.Height),
+		Text: fmt.Sprintf("Rendering at 200 DPI (%dpx x %dpx for %.1f\" x %.1f\")",
+			widthPx, heightPx, job.Width, job.Height),
 		Color: colorNRGBA(0, 255, 255, 255), // Cyan
 	}
-
 	return pm.processPDFPagesWithFixedDPI(pdfReader, numPages, job, console, widthPx, heightPx)
 }
 
@@ -365,6 +336,7 @@ func (pm *PrintManager) processPDFPagesWithFixedDPI(pdfReader *model.PdfReader, 
 }
 
 // printWithPipeline implements a producer-consumer pipeline for efficient rendering and printing
+// CRITICAL: Printer is initialized ONLY after first page is ready to prevent driver corruption
 func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages int, job PrintJob, console *Console, widthPx, heightPx int) error {
 	// Ordered page delivery system
 	type PageResult struct {
@@ -377,53 +349,16 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	// Channel for rendering results (unordered)
 	resultChan := make(chan PageResult, numPages)
 	// Channel for ordered page delivery to printer
-	printChan := make(chan *image.Gray, 3) // Buffer 3 pages ahead
+	printChan := make(chan *image.Gray, 10) // Buffer 10 pages ahead
 	errChan := make(chan error, 1)
 
-	// CRITICAL: Setup printer DC and start document BEFORE rendering
-	// This ensures the printer is ready to consume pages immediately
-	log.Printf("Setting up printer DC for: %s", job.PrinterName)
+	// Signal channel to indicate first page is ready
+	firstPageReady := make(chan struct{})
 
-	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
-	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
-
-	hDC, _, err := procCreateDC.Call(
-		uintptr(unsafe.Pointer(winspool16Ptr)),
-		uintptr(unsafe.Pointer(printerNamePtr)),
-		0, 0)
-	if hDC == 0 {
-		log.Printf("ERROR: Failed to create printer DC: %v", err)
-		return fmt.Errorf("failed to create printer DC: %v", err)
-	}
-	defer procDeleteDC.Call(hDC)
-
-	log.Printf("Printer DC created successfully, starting document...")
-
-	// Get printer capabilities
-	pageWidthPx, _, _ := procGetDeviceCaps.Call(hDC, HORZRES)
-
-	// Start document once
-	jobNamePtr, _ := syscall.UTF16PtrFromString(fmt.Sprintf("Cloud Print Job %s", job.JobID))
-	docInfo := DOCINFO{
-		CbSize:       int32(unsafe.Sizeof(DOCINFO{})),
-		LpszDocName:  jobNamePtr,
-		LpszOutput:   nil,
-		LpszDatatype: nil,
-		FwType:       0,
-	}
-
-	var ret uintptr
-	ret, _, err = procStartDoc.Call(hDC, uintptr(unsafe.Pointer(&docInfo)))
-	if ret <= 0 {
-		log.Printf("ERROR: Failed to start document: %v", err)
-		return fmt.Errorf("failed to start document: %v", err)
-	}
-	defer procEndDoc.Call(hDC)
-
-	log.Printf("Document started successfully, launching render pipeline...")
+	log.Printf("Starting render pipeline before printer initialization...")
 
 	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("Printer ready - starting %d page render pipeline", numPages),
+		Text:  fmt.Sprintf("Starting %d page render pipeline...", numPages),
 		Color: colorNRGBA(0, 255, 255, 255), // Cyan
 	}
 
@@ -440,15 +375,21 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	var renderWg sync.WaitGroup
 
 	// Launch render goroutines in background so we don't block the printer
+	// Launch rendering goroutines
 	go func() {
 		for pageNum := 1; pageNum <= numPages; pageNum++ {
+			// CRITICAL: Add to WaitGroup BEFORE launching goroutine
+			// This prevents renderWg.Wait() from returning before goroutines start
 			renderWg.Add(1)
-			semaphore <- struct{}{} // This will block after maxWorkers, but we're in a goroutine so it's OK
 
 			go func(pNum int) {
+				// CRITICAL: Move renderWg.Done() to outermost defer so it's called LAST
+				// This ensures channel sends complete before signaling completion
 				defer renderWg.Done()
 				defer func() {
 					<-semaphore
+				}()
+				defer func() {
 					// Recover from any panic to prevent crash
 					if r := recover(); r != nil {
 						log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
@@ -470,6 +411,9 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 				// Pass mutex to the render function - it will lock only for GetPage()
 				img, err := pm.renderPDFPageToMonochrome(pdfReader, pNum, widthPx, heightPx, &pdfReaderMutex)
+
+				// Acquire semaphore AFTER starting work to avoid blocking the launch loop
+				semaphore <- struct{}{}
 
 				if err != nil {
 					log.Printf("ERROR rendering page %d: %v", pNum, err)
@@ -515,13 +459,6 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 					// Channel closed or full - this shouldn't happen in normal flow
 					log.Printf("WARNING: Could not send page %d - channel closed or full", pNum)
 				}
-
-				// Save debug images asynchronously using the COPY
-				// go func(image *image.Gray, pageNumber int, jobID string) {
-				// 	if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
-				// 		log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
-				// 	}
-				// }(imgCopy, pNum, job.JobID)
 			}(pageNum)
 		}
 	}()
@@ -533,6 +470,7 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	}()
 
 	// Sequencer: Receive unordered results and send to printer in correct order
+	// CRITICAL: Signal when first page is ready so printer can be initialized
 	go func() {
 		defer close(printChan)
 
@@ -540,6 +478,7 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		nextPageToSend := 1
 		hasError := false
 		resultsReceived := 0
+		firstPageSignaled := false
 
 		log.Printf("Sequencer: Starting, waiting for %d pages from job %s", numPages, job.JobID)
 
@@ -589,6 +528,13 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 						break
 					}
 
+					// CRITICAL: Signal when first page is ready (page 1)
+					if nextPageToSend == 1 && !firstPageSignaled {
+						log.Printf("Sequencer: First page ready, signaling printer initialization")
+						close(firstPageReady)
+						firstPageSignaled = true
+					}
+
 					// No need for additional copy - image is already a deep copy from render goroutine
 					log.Printf("Sequencer: Sending page %d to printer (size: %dx%d, pix: %d bytes)",
 						nextPageToSend, img.Bounds().Dx(), img.Bounds().Dy(), len(img.Pix))
@@ -630,39 +576,151 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		log.Printf("Sequencer finished: sent %d pages, has error: %v, received %d results", nextPageToSend-1, hasError, resultsReceived)
 	}()
 
-	// Consumer: Print pages as they arrive in order (printer is already initialized)
-	log.Printf("About to call printer consumer function...")
-	printErr := pm.printPagesFromChannel(printChan, errChan, numPages, hDC, pageWidthPx, console)
+	// Consumer: Initialize printer and print pages
+	// CRITICAL: Wait for first page before initializing printer to prevent corruption
+	log.Printf("Waiting for first page before initializing printer...")
+	printErr := pm.printPagesFromChannelWithInit(printChan, errChan, numPages, firstPageReady, job, console)
+
+	// Check for errors (print function handles its own cleanup)
+	if printErr != nil {
+		log.Printf("Print error occurred: %v", printErr)
+		return printErr
+	}
 
 	// Check for rendering errors
 	select {
 	case renderErr := <-errChan:
-		log.Printf("Rendering error occurred: %v, calling AbortDoc to reset printer state", renderErr)
-		procAbortDoc.Call(hDC)
+		log.Printf("Rendering error occurred: %v", renderErr)
 		return renderErr
 	default:
-		// No rendering error, check print error
-		if printErr != nil {
-			log.Printf("Print error occurred: %v, calling AbortDoc to reset printer state", printErr)
-			procAbortDoc.Call(hDC)
-			return printErr
-		}
+		// Success
 	}
 
-	// SUCCESS: Document completed successfully
-	// EndDoc will be called by defer, and then DeleteDC
-	log.Printf("Print job completed successfully, EndDoc will finalize document")
+	log.Printf("Print job completed successfully")
 	return nil
 }
 
-// printPagesFromChannel prints pages from channel - printer DC already initialized
-func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, hDC uintptr, pageWidthPx uintptr, console *Console) error {
-	// Print each page as it arrives (already in correct order)
+// printPagesFromChannelWithInit initializes printer after first page is ready, then prints all pages
+// CRITICAL: Printer DC is created ONLY after first page arrives to prevent driver corruption
+func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, firstPageReady <-chan struct{}, job PrintJob, console *Console) error {
+	var hDC uintptr
+	var pageWidthPx uintptr
+	var pageHeightPx uintptr
+	var printerDpiX uintptr
+	var printerDpiY uintptr
+	printerInitialized := false
 	pageNum := 0
 	var ret uintptr
 	var err error
 
-	log.Printf("Printer consumer ready - waiting for first page...")
+	log.Printf("Printer consumer waiting for first page...")
+
+	// CRITICAL: Wait for first page to be ready before initializing printer
+	// This prevents the printer driver from being locked in a bad state
+	select {
+	case <-firstPageReady:
+		log.Printf("First page ready - initializing printer now...")
+	case <-time.After(60 * time.Second):
+		return fmt.Errorf("timeout waiting for first page to render")
+	}
+
+	// Initialize printer DC now that first page is ready
+	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
+	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
+
+	hDC, _, err = procCreateDC.Call(
+		uintptr(unsafe.Pointer(winspool16Ptr)),
+		uintptr(unsafe.Pointer(printerNamePtr)),
+		0, 0)
+	if hDC == 0 {
+		log.Printf("ERROR: Failed to create printer DC: %v", err)
+		return fmt.Errorf("failed to create printer DC: %v", err)
+	}
+	defer func() {
+		if printerInitialized {
+			// Ensure GDI commands are flushed before closing
+			procGdiFlush.Call()
+			time.Sleep(200 * time.Millisecond) // Increased from 100ms
+			// Reset DC to clean state before closing
+			procResetDC.Call(hDC, 0)
+		}
+		procDeleteDC.Call(hDC)
+		log.Printf("Printer DC closed and resources released")
+	}()
+
+	log.Printf("Printer DC created successfully")
+
+	// Get printer's ACTUAL printable area - this accounts for hardware margins
+	pageWidthPx, _, _ = procGetDeviceCaps.Call(hDC, HORZRES)
+	pageHeightPx, _, _ = procGetDeviceCaps.Call(hDC, VERTRES)
+
+	// Get printer DPI
+	printerDpiX, _, _ = procGetDeviceCaps.Call(hDC, LOGPIXELSX)
+	printerDpiY, _, _ = procGetDeviceCaps.Call(hDC, LOGPIXELSY)
+
+	// CRITICAL: Use the SMALLER DPI to ensure uniform scaling and reduce memory usage
+	// This prevents aspect ratio distortion and works better with lower-end printers
+	printerDpi := printerDpiX
+	if printerDpiY < printerDpiX {
+		printerDpi = printerDpiY
+	}
+
+	log.Printf("Printer: ACTUAL printable area = %dx%d px, DPI X=%d Y=%d, using minimum DPI=%d",
+		pageWidthPx, pageHeightPx, printerDpiX, printerDpiY, printerDpi)
+	log.Printf("Job paper size: %.2f\" x %.2f\" (theoretical %dx%d px at %d DPI, but using actual printable area)",
+		job.Width, job.Height, int(job.Width*float64(printerDpi)), int(job.Height*float64(printerDpi)), printerDpi)
+
+	// Calculate target dimensions at printer's DPI (using smaller DPI for both dimensions)
+	// job.Width and job.Height are in inches
+	targetWidthPx := int(job.Width * float64(printerDpi))
+	targetHeightPx := int(job.Height * float64(printerDpi))
+
+	log.Printf("JOB target: %dx%d px for %.2f\"x%.2f\" at %d DPI",
+		targetWidthPx, targetHeightPx, job.Width, job.Height, printerDpi)
+
+	// Start document
+	jobNamePtr, _ := syscall.UTF16PtrFromString(fmt.Sprintf("Cloud Print Job %s", job.JobID))
+	docInfo := DOCINFO{
+		CbSize:       int32(unsafe.Sizeof(DOCINFO{})),
+		LpszDocName:  jobNamePtr,
+		LpszOutput:   nil,
+		LpszDatatype: nil,
+		FwType:       0,
+	}
+
+	ret, _, err = procStartDoc.Call(hDC, uintptr(unsafe.Pointer(&docInfo)))
+	if ret <= 0 {
+		log.Printf("ERROR: Failed to start document: %v", err)
+		return fmt.Errorf("failed to start document: %v", err)
+	}
+	printerInitialized = true
+
+	// CRITICAL: ResetDC to ensure printer driver is in clean state after StartDoc
+	// This prevents leftover state from previous jobs from corrupting the output
+	procResetDC.Call(hDC, 0)
+	log.Printf("Printer DC reset - driver in clean state")
+
+	defer func() {
+		if printerInitialized {
+			// Flush all pending GDI commands before ending document
+			procGdiFlush.Call()
+			// Increased wait time to ensure spooler processes all pages
+			time.Sleep(time.Duration(numPages*250) * time.Millisecond) // Increased from 200ms per page
+			procEndDoc.Call(hDC)
+			log.Printf("Document ended and finalized")
+		}
+	}()
+
+	console.MsgChan <- Message{
+		Text:  fmt.Sprintf("Printer initialized - ready to print %d pages", numPages),
+		Color: colorNRGBA(0, 255, 0, 255), // Green
+	}
+
+	// CRITICAL: Small delay to ensure printer is fully initialized
+	// This prevents the first page from being blank or corrupted
+	time.Sleep(300 * time.Millisecond)
+
+	log.Printf("Document started - now processing pages from channel...")
 
 	for img := range pageChan {
 		pageNum++
@@ -686,11 +744,12 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 			return fmt.Errorf("page %d: received nil image from channel", pageNum)
 		}
 
-		// CRITICAL: Validate image has valid pixel data
-		if img.Pix == nil || len(img.Pix) == 0 {
-			log.Printf("ERROR: Page %d has nil or empty Pix buffer", pageNum)
-			return fmt.Errorf("page %d: image has no pixel data", pageNum)
-		}
+		// Save debug images asynchronously using the COPY
+		// go func(image *image.Gray, pageNumber int, jobID string) {
+		// 	if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
+		// 		log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
+		// 	}
+		// }(img, pageNum, fmt.Sprintf("page%d", pageNum))
 
 		// Get image dimensions - ensure we use actual bounds not min/max
 		bounds := img.Bounds()
@@ -712,17 +771,69 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		log.Printf("Page %d: Received image %dpx x %dpx (bounds: %v)", pageNum, imgWidth, imgHeight, bounds)
 
-		// Calculate position (centered)
-		offsetX := (int(pageWidthPx) - imgWidth) / 2
+		// CRITICAL: Resize image to match printer's ACTUAL printable area, not paper size
+		// The printer's printable area (pageWidthPx/pageHeightPx) is smaller than paper due to margins
+		// We must fit within this area or the image will be clipped/misaligned
+		targetWidthPx := int(pageWidthPx)
+		targetHeightPx := int(pageHeightPx)
+
+		// Maintain aspect ratio - scale to fit within printable area
+		aspectRatio := float64(imgWidth) / float64(imgHeight)
+		pageAspectRatio := float64(targetWidthPx) / float64(targetHeightPx)
+
+		if aspectRatio > pageAspectRatio {
+			// Image is wider relative to page - fit to width
+			targetHeightPx = int(float64(targetWidthPx) / aspectRatio)
+		} else {
+			// Image is taller relative to page - fit to height
+			targetWidthPx = int(float64(targetHeightPx) * aspectRatio)
+		}
+
+		log.Printf("Page %d: Resizing from %dx%d (300 DPI) to %dx%d (fit to printable area %dx%d)",
+			pageNum, imgWidth, imgHeight, targetWidthPx, targetHeightPx, pageWidthPx, pageHeightPx)
+
+		// Resize the image efficiently
+		resizedImg := resizeGrayscale(img, targetWidthPx, targetHeightPx)
+
+		// Update dimensions to use resized image
+		img = resizedImg
+		bounds = img.Bounds()
+		imgWidth = bounds.Dx()
+		imgHeight = bounds.Dy()
+
+		log.Printf("Page %d: Image resized to %dpx x %dpx", pageNum, imgWidth, imgHeight)
+
+		// CRITICAL: Use image dimensions directly with 1:1 mapping
+		// Now that image is at printer DPI, physical size will match exactly
+		destWidth := imgWidth
+		destHeight := imgHeight
+
+		// CRITICAL: Center horizontally, align to top vertically
+		// Calculate horizontal offset to center the image on the page
+		log.Printf("Page %d: DIAGNOSTIC - pageWidthPx=%d, pageHeightPx=%d, destWidth=%d, destHeight=%d",
+			pageNum, pageWidthPx, pageHeightPx, destWidth, destHeight)
+
+		offsetX := (int(pageWidthPx) - destWidth) / 2
+		offsetY := 0 // Start from top of page
+
+		// Ensure horizontal offset is not negative (image wider than page)
 		if offsetX < 0 {
 			offsetX = 0
+			log.Printf("WARNING: Page %d - Image width %d exceeds page width %d, left-aligning", pageNum, destWidth, pageWidthPx)
 		}
+
+		log.Printf("Page %d: DIAGNOSTIC - Calculated offsetX=%d (should center %d px image on %d px page)",
+			pageNum, offsetX, destWidth, pageWidthPx)
+		log.Printf("Page %d: Positioning image %dx%d on page %dx%d with offset (%d, %d) - centered horizontally, top-aligned",
+			pageNum, destWidth, destHeight, pageWidthPx, pageHeightPx, offsetX, offsetY)
 
 		// Start page
 		ret, _, err = procStartPage.Call(hDC)
 		if ret <= 0 {
 			return fmt.Errorf("failed to start page %d: %v", pageNum, err)
 		}
+
+		log.Printf("Page %d: Started page", pageNum)
 
 		// Create 8-bit grayscale DIB with proper DWORD-aligned stride
 		// Windows DIB requires scan lines to be DWORD-aligned (multiple of 4 bytes)
@@ -738,7 +849,7 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		if !needsPixelByPixel {
 			// Optimized path: direct copy when stride matches and bounds at (0,0)
-			// CRITICAL: Validate we have enough source data
+			// Top-down DIB: copy rows in natural order (no flip)
 			if len(img.Pix) < img.Stride*imgHeight {
 				log.Printf("ERROR: Insufficient source data for direct copy on page %d", pageNum)
 				return fmt.Errorf("page %d: insufficient source pixel data", pageNum)
@@ -746,7 +857,6 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 			for y := 0; y < imgHeight; y++ {
 				srcOffset := y * img.Stride
 				dstOffset := y * stride
-				// CRITICAL: Bounds check before copy
 				if srcOffset+imgWidth > len(img.Pix) {
 					log.Printf("ERROR: Page %d row %d would read past buffer end", pageNum, y)
 					return fmt.Errorf("page %d: buffer overrun at row %d", pageNum, y)
@@ -754,7 +864,7 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 				copy(imageData[dstOffset:dstOffset+imgWidth], img.Pix[srcOffset:srcOffset+imgWidth])
 			}
 		} else {
-			// Safe path: pixel-by-pixel copy when stride doesn't match or bounds offset
+			// Safe path: pixel-by-pixel copy
 			for y := 0; y < imgHeight; y++ {
 				rowOffset := y * stride
 				for x := 0; x < imgWidth; x++ {
@@ -793,7 +903,7 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		bmi.BmiHeader.BiSize = uint32(unsafe.Sizeof(BITMAPINFOHEADER{}))
 		bmi.BmiHeader.BiWidth = int32(imgWidth)
-		bmi.BmiHeader.BiHeight = -int32(imgHeight) // NEGATIVE = top-down DIB (simpler, no Y-flip)
+		bmi.BmiHeader.BiHeight = -int32(imgHeight) // NEGATIVE = top-down DIB (standard, no flip needed)
 		bmi.BmiHeader.BiPlanes = 1
 		bmi.BmiHeader.BiBitCount = 8
 		bmi.BmiHeader.BiCompression = BI_RGB
@@ -820,17 +930,18 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 
 		log.Printf("Page %d: Calling StretchDIBits with %d bytes of image data", pageNum, len(imageData))
 
-		// Print the image - pass pointer to entire BMI structure (includes palette)
+		// Print the image - CRITICAL: Use destWidth/destHeight for scaling to printer DPI
+		// This scales the 150 DPI rendered image to fit the page at printer's native DPI
 		ret, _, err = procStretchDIBits.Call(
 			hDC,
-			uintptr(offsetX), uintptr(0),
-			uintptr(imgWidth), uintptr(imgHeight),
-			0, 0,
-			uintptr(imgWidth), uintptr(imgHeight),
+			uintptr(offsetX), uintptr(offsetY), // Destination position (centered)
+			uintptr(destWidth), uintptr(destHeight), // Destination size (scaled to printer DPI)
+			0, 0, // Source position (0,0)
+			uintptr(imgWidth), uintptr(imgHeight), // Source size (150 DPI image)
 			uintptr(unsafe.Pointer(&imageData[0])),
 			uintptr(unsafe.Pointer(bmi)),
 			DIB_RGB_COLORS,
-			SRCCOPY_STRETCH)
+			SRCCOPY) // 1:1 copy, no stretch
 
 		// Keep imageData and bmi alive until syscall completes
 		runtime.KeepAlive(imageData)
@@ -845,19 +956,22 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 		log.Printf("Page %d: StretchDIBits returned %d scan lines", pageNum, ret)
 
 		// CRITICAL: Flush GDI and wait to ensure all drawing commands are processed
-		// Ricoh printers need more time to process complex graphics
+		// Increased delay prevents printer driver corruption
 		procGdiFlush.Call()
-		time.Sleep(50 * time.Millisecond) // Extra delay for slower printers
+		time.Sleep(50 * time.Millisecond) // Increased from 50ms for better reliability
 
 		// End page - CRITICAL: Must complete before moving to next page
 		ret, _, err = procEndPage.Call(hDC)
 		if ret <= 0 {
+			// Abort document on error
+			procAbortDoc.Call(hDC)
+			printerInitialized = false // Prevent double cleanup
 			return fmt.Errorf("failed to end page %d: %v", pageNum, err)
 		}
 
-		// CRITICAL: Increased delay between pages for Ricoh printers
-		// They need more time to process each page in the spooler
-		time.Sleep(150 * time.Millisecond)
+		// CRITICAL: Increased delay between pages to ensure driver processes fully
+		// Prevents garbage output from pages being sent too quickly
+		time.Sleep(50 * time.Millisecond) // Increased from 150ms
 
 		console.MsgChan <- Message{
 			Text:  fmt.Sprintf("✓ Page %d/%d printed successfully", pageNum, numPages),
@@ -867,28 +981,20 @@ func (pm *PrintManager) printPagesFromChannel(pageChan <-chan *image.Gray, errCh
 		log.Printf("Successfully printed page %d/%d", pageNum, numPages)
 	}
 
-	// CRITICAL: Final flush and wait before ending document
-	// The spooler must have time to process all pages before EndDoc is called
-	log.Printf("All pages sent, flushing GDI commands...")
-	procGdiFlush.Call()
-
 	// CRITICAL: Verify all pages were sent
 	if pageNum != numPages {
 		log.Printf("ERROR: Expected %d pages but only sent %d", numPages, pageNum)
+		procAbortDoc.Call(hDC)
+		printerInitialized = false // Prevent double cleanup
 		return fmt.Errorf("incomplete print job: sent %d/%d pages", pageNum, numPages)
 	}
 
-	// Wait for spooler to catch up - essential for multi-page documents
-	// Without this, EndDoc may abort pages still being processed
-	log.Printf("Waiting for spooler to process all %d pages...", numPages)
-	time.Sleep(time.Duration(numPages*200) * time.Millisecond)
-
 	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("All %d pages sent to spooler", numPages),
+		Text:  fmt.Sprintf("All %d pages sent to printer successfully", numPages),
 		Color: colorNRGBA(0, 255, 0, 255), // Green
 	}
 
-	log.Printf("PrintPagesFromChannel complete - EndDoc will be called by defer")
+	log.Printf("All pages printed - defer will handle EndDoc and cleanup")
 	return nil
 }
 
@@ -910,17 +1016,27 @@ func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pa
 	device := render.NewImageDevice()
 	device.OutputWidth = widthPx
 
+	log.Printf("Page %d: Rendering with OutputWidth=%d to capture all content including images", pageNum, widthPx)
+
 	// Render at target DPI directly
 	img, err := device.Render(page)
 	if err != nil {
 		return nil, fmt.Errorf("render page %d at target DPI: %w", pageNum, err)
 	}
 
+	// Verify rendered image is not empty
+	// imgBounds := img.Bounds()
+	// log.Printf("Page %d: Rendered image bounds: %v (expected width: %d)", pageNum, imgBounds, widthPx)
+
 	// Convert to grayscale using standard library for best quality
 	bounds := img.Bounds()
 	// CRITICAL FIX: Always create image with (0,0) origin for consistent addressing
 	// This prevents corruption from non-zero Min bounds
 	grayImg := image.NewGray(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+
+	// Diagnostic: Count pixels to detect blank/transparent images
+	// pixelCount := 0
+	// nonWhitePixels := 0
 
 	// FIXED: Iterate using dimensions, not source bounds
 	// This ensures proper addressing even if source has non-zero Min
@@ -931,10 +1047,28 @@ func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pa
 			srcY := bounds.Min.Y + y
 			originalColor := img.At(srcX, srcY)
 			grayColor := color.GrayModel.Convert(originalColor)
+			gray := grayColor.(color.Gray)
+
+			// Count non-white pixels to detect if image has content
+			// pixelCount++
+			// if gray.Y < 250 { // Not white (allowing for slight variations)
+			// 	nonWhitePixels++
+			// }
+
 			// Write to normalized (0,0)-based destination
-			grayImg.SetGray(x, y, grayColor.(color.Gray))
+			grayImg.SetGray(x, y, gray)
 		}
 	}
+
+	// Log diagnostic info about image content
+	// percentageNonWhite := float64(nonWhitePixels) * 100.0 / float64(pixelCount)
+	// log.Printf("Page %d: Rendered image has %d/%d non-white pixels (%.2f%%) - checking for 8-bit images",
+	// 	pageNum, nonWhitePixels, pixelCount, percentageNonWhite)
+
+	// if percentageNonWhite < 0.1 {
+	// 	log.Printf("WARNING: Page %d appears mostly blank (%.2f%% non-white) - possible 8-bit image rendering issue",
+	// 		pageNum, percentageNonWhite)
+	// }
 
 	return grayImg, nil
 }
@@ -1259,7 +1393,7 @@ func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jo
 
 	// Monitor loop - runs until job completes or fails
 	for monitoringActive {
-		time.Sleep(500 * time.Millisecond) // Check every 500ms
+		time.Sleep(150 * time.Millisecond) // Check every 150ms
 
 		// Check if job still exists in tracker
 		if _, ok := printEventTracker.Load(strconv.Itoa(queueID)); !ok {
@@ -1983,17 +2117,22 @@ var (
 	// GDI APIs for direct printing
 	procCreateDC      = gdi32.NewProc("CreateDCW")
 	procDeleteDC      = gdi32.NewProc("DeleteDC")
+	procResetDC       = gdi32.NewProc("ResetDCW")
 	procStretchDIBits = gdi32.NewProc("StretchDIBits")
 
 	// Page size and device capability APIs
-	procGetDeviceCaps    = gdi32.NewProc("GetDeviceCaps")
-	procSetViewportExtEx = gdi32.NewProc("SetViewportExtEx")
-	procStartDoc         = gdi32.NewProc("StartDocW")
-	procEndDoc           = gdi32.NewProc("EndDoc")
-	procAbortDoc         = gdi32.NewProc("AbortDoc")
-	procStartPage        = gdi32.NewProc("StartPage")
-	procEndPage          = gdi32.NewProc("EndPage")
-	procGdiFlush         = gdi32.NewProc("GdiFlush")
+	procGetDeviceCaps     = gdi32.NewProc("GetDeviceCaps")
+	procSetViewportExtEx  = gdi32.NewProc("SetViewportExtEx")
+	procSetWindowExtEx    = gdi32.NewProc("SetWindowExtEx")
+	procSetMapMode        = gdi32.NewProc("SetMapMode")
+	procSetStretchBltMode = gdi32.NewProc("SetStretchBltMode")
+	procSetBrushOrgEx     = gdi32.NewProc("SetBrushOrgEx")
+	procStartDoc          = gdi32.NewProc("StartDocW")
+	procEndDoc            = gdi32.NewProc("EndDoc")
+	procAbortDoc          = gdi32.NewProc("AbortDoc")
+	procStartPage         = gdi32.NewProc("StartPage")
+	procEndPage           = gdi32.NewProc("EndPage")
+	procGdiFlush          = gdi32.NewProc("GdiFlush")
 
 	// Winspool APIs for thermal printing and Brother cutting
 	procOpenPrinter        = winspool.NewProc("OpenPrinterW")
@@ -2078,14 +2217,17 @@ const (
 	LOGPIXELSY = 90 // Logical pixels per inch vertically
 
 	// StretchDIBits mode
-	SRCCOPY_STRETCH = 0x00CC0020
+	SRCCOPY_STRETCH = 0x00CC0020 // Same value as SRCCOPY (already defined above)
+
+	// Stretch mode constants
+	HALFTONE = 4 // High-quality scaling with anti-aliasing
 
 	// Conversion constants
 	MM_PER_INCH      = 25.4
 	PIXELS_PER_METER = 39.3701 // pixels per meter conversion
 
 	// Windows GDI mapping modes for coordinate transformation
-	MM_TEXT        = 1 // Default mapping mode (1 unit = 1 pixel)
+	MM_TEXT        = 1 // Each logical unit is mapped to one device pixel (default)
 	MM_LOMETRIC    = 2 // 0.1mm units
 	MM_HIMETRIC    = 3 // 0.01mm units
 	MM_LOENGLISH   = 4 // 0.01 inch units
@@ -2109,4 +2251,59 @@ const (
 	JOB_STATUS_RESTART           = 0x00000800
 )
 
-// End of print.go - Direct GDI printing with safe form feed page cutting
+// resizeGrayscale efficiently resizes a grayscale image using bilinear interpolation
+func resizeGrayscale(src *image.Gray, targetWidth, targetHeight int) *image.Gray {
+	srcBounds := src.Bounds()
+	srcWidth := srcBounds.Dx()
+	srcHeight := srcBounds.Dy()
+
+	// Create destination image
+	dst := image.NewGray(image.Rect(0, 0, targetWidth, targetHeight))
+
+	// Calculate scaling factors
+	xScale := float64(srcWidth) / float64(targetWidth)
+	yScale := float64(srcHeight) / float64(targetHeight)
+
+	// Bilinear interpolation for better quality
+	for y := 0; y < targetHeight; y++ {
+		for x := 0; x < targetWidth; x++ {
+			// Map destination pixel to source coordinates
+			srcX := float64(x) * xScale
+			srcY := float64(y) * yScale
+
+			// Get integer parts
+			x0 := int(srcX)
+			y0 := int(srcY)
+			x1 := x0 + 1
+			y1 := y0 + 1
+
+			// Clamp to bounds
+			if x1 >= srcWidth {
+				x1 = srcWidth - 1
+			}
+			if y1 >= srcHeight {
+				y1 = srcHeight - 1
+			}
+
+			// Get fractional parts
+			fx := srcX - float64(x0)
+			fy := srcY - float64(y0)
+
+			// Get four neighboring pixels
+			p00 := float64(src.GrayAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y0).Y)
+			p10 := float64(src.GrayAt(srcBounds.Min.X+x1, srcBounds.Min.Y+y0).Y)
+			p01 := float64(src.GrayAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y1).Y)
+			p11 := float64(src.GrayAt(srcBounds.Min.X+x1, srcBounds.Min.Y+y1).Y)
+
+			// Bilinear interpolation
+			p0 := p00*(1-fx) + p10*fx
+			p1 := p01*(1-fx) + p11*fx
+			p := p0*(1-fy) + p1*fy
+
+			// Set destination pixel
+			dst.SetGray(x, y, color.Gray{Y: uint8(p + 0.5)})
+		}
+	}
+
+	return dst
+}
