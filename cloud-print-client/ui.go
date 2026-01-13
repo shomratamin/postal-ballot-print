@@ -673,6 +673,7 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 
 					printCommand := PrintCommand{
 						Command:   "test-print",
+						JobName:   "Test Print 8.5x7.75 inch",
 						Width:     8.5,
 						Height:    7.75,
 						Unit:      "inch",

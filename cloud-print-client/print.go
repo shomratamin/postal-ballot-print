@@ -37,6 +37,7 @@ var query_auto_print_log = true
 type PrintJob struct {
 	PrinterName      string
 	PrintOrientation string
+	JobName          string
 	Data             []byte // Data to be printed
 	Token            string // Job token
 	Width            float64
@@ -326,7 +327,7 @@ func (pm *PrintManager) processPDFPagesInMemory(pdfReader *model.PdfReader, numP
 func (pm *PrintManager) processPDFPagesWithFixedDPI(pdfReader *model.PdfReader, numPages int, job PrintJob, console *Console, widthPx, heightPx int) error {
 
 	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("Starting pipeline rendering and printing for %d pages (%.1f\" x %.1f\")", numPages, job.JobID, job.Width, job.Height),
+		Text:  fmt.Sprintf("Starting pipeline rendering and printing for %d pages (%.1f\" x %.1f\")", numPages, job.Width, job.Height),
 		Color: colorNRGBA(0, 255, 255, 255), // Cyan
 	}
 
@@ -342,14 +343,14 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	type PageResult struct {
 		jobID   string // Job identifier for isolation
 		pageNum int
-		img     *image.Gray
+		img     *image.RGBA
 		err     error
 	}
 
 	// Channel for rendering results (unordered)
 	resultChan := make(chan PageResult, numPages)
 	// Channel for ordered page delivery to printer
-	printChan := make(chan *image.Gray, 10) // Buffer 10 pages ahead
+	printChan := make(chan *image.RGBA, 10) // Buffer 10 pages ahead
 	errChan := make(chan error, 1)
 
 	// Signal channel to indicate first page is ready
@@ -383,13 +384,12 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 			renderWg.Add(1)
 
 			go func(pNum int) {
-				// CRITICAL: Move renderWg.Done() to outermost defer so it's called LAST
-				// This ensures channel sends complete before signaling completion
-				defer renderWg.Done()
+				// CRITICAL: Panic recovery must be outermost defer to handle all panics
+				// renderWg.Done() is called at the END to ensure all channel operations complete first
 				defer func() {
+					// Release semaphore
 					<-semaphore
-				}()
-				defer func() {
+
 					// Recover from any panic to prevent crash
 					if r := recover(); r != nil {
 						log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
@@ -397,11 +397,16 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 						select {
 						case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}:
 							// Sent successfully
+							log.Printf("Sent panic error for page %d", pNum)
 						default:
 							// Channel closed or full, skip
 							log.Printf("Could not send panic error for page %d - channel closed", pNum)
 						}
 					}
+
+					// CRITICAL: Signal completion LAST after all channel operations
+					// This prevents resultChan from being closed while sends are in progress
+					renderWg.Done()
 				}()
 
 				console.MsgChan <- Message{
@@ -438,12 +443,15 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 				// CRITICAL FIX: Create deep copy IMMEDIATELY after rendering to prevent memory corruption
 				// This ensures each page has its own independent memory buffer
-				imgCopy := &image.Gray{
+				imgCopy := &image.RGBA{
 					Pix:    make([]byte, len(img.Pix)),
 					Stride: img.Stride,
 					Rect:   img.Rect,
 				}
 				copy(imgCopy.Pix, img.Pix)
+
+				log.Printf("Page %d: Created deep copy - Pix size: %d, Stride: %d, Rect: %v",
+					pNum, len(imgCopy.Pix), imgCopy.Stride, imgCopy.Rect)
 
 				console.MsgChan <- Message{
 					Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy()),
@@ -457,7 +465,7 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 					// Sent successfully
 				default:
 					// Channel closed or full - this shouldn't happen in normal flow
-					log.Printf("WARNING: Could not send page %d - channel closed or full", pNum)
+					log.Printf("Could not send result for page %d - channel closed", pNum)
 				}
 			}(pageNum)
 		}
@@ -474,7 +482,7 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	go func() {
 		defer close(printChan)
 
-		pageBuffer := make(map[int]*image.Gray)
+		pageBuffer := make(map[int]*image.RGBA)
 		nextPageToSend := 1
 		hasError := false
 		resultsReceived := 0
@@ -519,7 +527,14 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 				if img, ok := pageBuffer[nextPageToSend]; ok {
 					// Validate image
 					if img == nil || img.Pix == nil || len(img.Pix) == 0 {
-						log.Printf("ERROR: Invalid image in buffer for page %d", nextPageToSend)
+						log.Printf("ERROR: Invalid image in buffer for page %d - img: %v, Pix: %v, Pix len: %d",
+							nextPageToSend, img != nil, img != nil && img.Pix != nil,
+							func() int {
+								if img != nil && img.Pix != nil {
+									return len(img.Pix)
+								}
+								return 0
+							}())
 						hasError = true
 						select {
 						case errChan <- fmt.Errorf("invalid image for page %d", nextPageToSend):
@@ -602,7 +617,7 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 // printPagesFromChannelWithInit initializes printer after first page is ready, then prints all pages
 // CRITICAL: Printer DC is created ONLY after first page arrives to prevent driver corruption
-func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gray, errChan <-chan error, numPages int, firstPageReady <-chan struct{}, job PrintJob, console *Console) error {
+func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGBA, errChan <-chan error, numPages int, firstPageReady <-chan struct{}, job PrintJob, console *Console) error {
 	var hDC uintptr
 	var pageWidthPx uintptr
 	var pageHeightPx uintptr
@@ -628,23 +643,185 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 	printerNamePtr, _ := syscall.UTF16PtrFromString(job.PrinterName)
 	winspool16Ptr, _ := syscall.UTF16PtrFromString("WINSPOOL")
 
+	// Convert job dimensions from inches to 0.1mm for DEVMODE
+	paperWidthMM := int16(job.Width * 254)   // inches * 25.4 * 10
+	paperLengthMM := int16(job.Height * 254) // inches * 25.4 * 10
+
+	// Open printer to get handle for DocumentProperties
+	var hPrinter syscall.Handle
+	ret, _, _ = procOpenPrinter.Call(
+		uintptr(unsafe.Pointer(printerNamePtr)),
+		uintptr(unsafe.Pointer(&hPrinter)),
+		0)
+	if ret == 0 {
+		log.Printf("⚠️  Failed to open printer, using simple DEVMODE")
+		hPrinter = 0
+	}
+	if hPrinter != 0 {
+		defer procClosePrinter.Call(uintptr(hPrinter))
+	}
+
+	// Get printer's default DEVMODE size
+	var devModeSize int32
+	if hPrinter != 0 {
+		ret, _, _ = procDocumentProperties.Call(
+			0, // hwnd
+			uintptr(hPrinter),
+			uintptr(unsafe.Pointer(printerNamePtr)),
+			0, // pDevModeOutput (NULL to get size)
+			0, // pDevModeInput
+			0) // fMode (0 to get size)
+		devModeSize = int32(ret)
+	}
+
+	if devModeSize <= 0 {
+		devModeSize = int32(unsafe.Sizeof(DEVMODE{}))
+	}
+
+	// CRITICAL: Validate devModeSize is reasonable (prevent allocation crashes)
+	if devModeSize > 65536 { // 64KB max for DEVMODE
+		log.Printf("⚠️  Invalid devModeSize %d, capping at 64KB", devModeSize)
+		devModeSize = 65536
+	}
+	if devModeSize < int32(unsafe.Sizeof(DEVMODE{})) {
+		log.Printf("⚠️  devModeSize %d too small, using minimum", devModeSize)
+		devModeSize = int32(unsafe.Sizeof(DEVMODE{}))
+	}
+
+	// Allocate buffer and get printer's default DEVMODE
+	devModeBuffer := make([]byte, devModeSize)
+	// CRITICAL: Validate buffer before unsafe pointer cast
+	if len(devModeBuffer) < int(unsafe.Sizeof(DEVMODE{})) {
+		log.Printf("ERROR: devModeBuffer too small: %d bytes", len(devModeBuffer))
+		return fmt.Errorf("devModeBuffer allocation failed")
+	}
+	if len(devModeBuffer) == 0 {
+		log.Printf("ERROR: devModeBuffer is empty")
+		return fmt.Errorf("devModeBuffer is empty - cannot create DEVMODE pointer")
+	}
+	devMode := (*DEVMODE)(unsafe.Pointer(&devModeBuffer[0]))
+	devMode.Size = uint16(unsafe.Sizeof(DEVMODE{}))
+	devMode.DriverExtra = uint16(devModeSize) - uint16(unsafe.Sizeof(DEVMODE{}))
+
+	if hPrinter != 0 {
+		// Get default settings from printer
+		ret, _, _ = procDocumentProperties.Call(
+			0, // hwnd
+			uintptr(hPrinter),
+			uintptr(unsafe.Pointer(printerNamePtr)),
+			uintptr(unsafe.Pointer(devMode)), // pDevModeOutput
+			0,                                // pDevModeInput
+			2)                                // DM_OUT_BUFFER
+		if ret < 0 {
+			log.Printf("⚠️  Failed to get default DEVMODE")
+		} else {
+			log.Printf("✅ Got default DEVMODE from printer, size: %d, driverExtra: %d", devMode.Size, devMode.DriverExtra)
+		}
+	}
+
+	// Modify paper size fields - DON'T use DM_FORMNAME to avoid printer rejecting custom size
+	devMode.Fields |= DM_PAPERSIZE | DM_PAPERLENGTH | DM_PAPERWIDTH | DM_ORIENTATION | DM_DUPLEX
+	devMode.PaperSize = DMPAPER_USER // Custom size
+	devMode.PaperWidth = paperWidthMM
+	devMode.PaperLength = paperLengthMM
+	devMode.Duplex = DMDUP_SIMPLEX // Single-sided
+
+	// Set orientation
+	if job.PrintOrientation == "L" || job.PrintOrientation == "Landscape" {
+		devMode.Orientation = DMORIENT_LANDSCAPE
+	} else {
+		devMode.Orientation = DMORIENT_PORTRAIT
+	}
+
+	// CRITICAL: Skip DocumentProperties validation for Ricoh printers
+	// Ricoh drivers often reject custom paper sizes during validation and revert to A4
+	// Instead, pass DEVMODE directly to CreateDC without validation
+	skipValidation := false
+	printerNameLower := strings.ToLower(job.PrinterName)
+	if strings.Contains(printerNameLower, "ricoh") {
+		log.Printf("🔧 Ricoh printer detected - skipping DEVMODE validation to preserve custom paper size")
+		skipValidation = true
+	}
+
+	if !skipValidation && hPrinter != 0 {
+		outputBuffer := make([]byte, devModeSize)
+		// CRITICAL: Validate output buffer before unsafe pointer cast
+		if len(outputBuffer) < int(unsafe.Sizeof(DEVMODE{})) {
+			log.Printf("⚠️  Output buffer too small, skipping validation")
+		} else {
+			outputDevMode := (*DEVMODE)(unsafe.Pointer(&outputBuffer[0]))
+			outputDevMode.Size = uint16(unsafe.Sizeof(DEVMODE{}))
+			outputDevMode.DriverExtra = uint16(devModeSize) - uint16(unsafe.Sizeof(DEVMODE{}))
+
+			ret, _, _ = procDocumentProperties.Call(
+				0, // hwnd
+				uintptr(hPrinter),
+				uintptr(unsafe.Pointer(printerNamePtr)),
+				uintptr(unsafe.Pointer(outputDevMode)), // pDevModeOutput
+				uintptr(unsafe.Pointer(devMode)),       // pDevModeInput
+				10)                                     // DM_IN_BUFFER | DM_OUT_BUFFER (8|2)
+			if ret >= 0 {
+				// Check if validation changed paper size back to A4
+				if outputDevMode.PaperSize != DMPAPER_USER {
+					log.Printf("⚠️  Validation changed PaperSize from USER(%d) to %d - using unvalidated DEVMODE",
+						DMPAPER_USER, outputDevMode.PaperSize)
+				} else {
+					// Use validated DEVMODE only if it preserved our custom size
+					devMode = outputDevMode
+					devModeBuffer = outputBuffer
+					log.Printf("✅ DEVMODE validated: PaperSize=%d, Width=%dmm, Length=%dmm, Duplex=%d",
+						devMode.PaperSize, devMode.PaperWidth/10, devMode.PaperLength/10, devMode.Duplex)
+				}
+			} else {
+				log.Printf("⚠️  DEVMODE validation failed (ret=%d), using unvalidated settings", ret)
+			}
+		}
+	}
+
+	log.Printf("📄 Creating DC with custom paper size: %.1f x %.1f inches (%dmm x %dmm), orientation: %d, duplex: %d",
+		job.Width, job.Height, paperWidthMM/10, paperLengthMM/10, devMode.Orientation, devMode.Duplex)
+
+	// Create DC with validated DEVMODE
+	// CRITICAL: Validate devMode pointer is within buffer bounds
+	if devMode == nil || uintptr(unsafe.Pointer(devMode)) < uintptr(unsafe.Pointer(&devModeBuffer[0])) {
+		log.Printf("ERROR: Invalid devMode pointer")
+		return fmt.Errorf("invalid devMode pointer")
+	}
 	hDC, _, err = procCreateDC.Call(
 		uintptr(unsafe.Pointer(winspool16Ptr)),
 		uintptr(unsafe.Pointer(printerNamePtr)),
-		0, 0)
+		0,
+		uintptr(unsafe.Pointer(devMode)))
 	if hDC == 0 {
 		log.Printf("ERROR: Failed to create printer DC: %v", err)
 		return fmt.Errorf("failed to create printer DC: %v", err)
 	}
+
+	// CRITICAL: Apply DEVMODE settings immediately after DC creation
+	// This ensures Ricoh driver picks up the custom paper size
+	newHDC, _, _ := procResetDC.Call(hDC, uintptr(unsafe.Pointer(devMode)))
+	if newHDC == 0 {
+		log.Printf("⚠️  ResetDC failed, continuing with original DC")
+	} else {
+		log.Printf("✅ DC reset with DEVMODE applied successfully")
+	}
+
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC during printer cleanup: %v", r)
+		}
 		if printerInitialized {
 			// Ensure GDI commands are flushed before closing
 			procGdiFlush.Call()
 			time.Sleep(200 * time.Millisecond) // Increased from 100ms
 			// Reset DC to clean state before closing
-			procResetDC.Call(hDC, 0)
+			if hDC != 0 {
+				procResetDC.Call(hDC, 0)
+			}
 		}
-		procDeleteDC.Call(hDC)
+		if hDC != 0 {
+			procDeleteDC.Call(hDC)
+		}
 		log.Printf("Printer DC closed and resources released")
 	}()
 
@@ -679,7 +856,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 		targetWidthPx, targetHeightPx, job.Width, job.Height, printerDpi)
 
 	// Start document
-	jobNamePtr, _ := syscall.UTF16PtrFromString(fmt.Sprintf("Cloud Print Job %s", job.JobID))
+	jobNamePtr, _ := syscall.UTF16PtrFromString(fmt.Sprintf("BPO Print Job- %s", job.JobName))
 	docInfo := DOCINFO{
 		CbSize:       int32(unsafe.Sizeof(DOCINFO{})),
 		LpszDocName:  jobNamePtr,
@@ -695,19 +872,24 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 	}
 	printerInitialized = true
 
-	// CRITICAL: ResetDC to ensure printer driver is in clean state after StartDoc
-	// This prevents leftover state from previous jobs from corrupting the output
-	procResetDC.Call(hDC, 0)
-	log.Printf("Printer DC reset - driver in clean state")
-
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC during document end: %v", r)
+		}
 		if printerInitialized {
 			// Flush all pending GDI commands before ending document
-			procGdiFlush.Call()
-			// Increased wait time to ensure spooler processes all pages
-			time.Sleep(time.Duration(numPages*250) * time.Millisecond) // Increased from 200ms per page
-			procEndDoc.Call(hDC)
-			log.Printf("Document ended and finalized")
+			if hDC != 0 {
+				procGdiFlush.Call()
+				// For reusable DIB approach, shorter wait is sufficient
+				waitTime := 5 * time.Second
+				if numPages > 50 {
+					waitTime = 10 * time.Second
+				}
+				log.Printf("Waiting %v for spooler to process %d pages before ending document", waitTime, numPages)
+				time.Sleep(waitTime)
+				procEndDoc.Call(hDC)
+				log.Printf("Document ended and finalized")
+			}
 		}
 	}()
 
@@ -718,9 +900,31 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 
 	// CRITICAL: Small delay to ensure printer is fully initialized
 	// This prevents the first page from being blank or corrupted
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	log.Printf("Document started - now processing pages from channel...")
+
+	// CRITICAL: Create reusable DIB section ONCE for all pages
+	// This prevents GDI resource exhaustion and is much faster
+	log.Printf("Creating reusable DIB section for %dx%d pages", targetWidthPx, targetHeightPx)
+
+	screenDC, _, _ := procGetDC.Call(0)
+	if screenDC == 0 {
+		return fmt.Errorf("failed to get screen DC")
+	}
+	defer procReleaseDC.Call(0, screenDC)
+
+	memDC, _, _ := procCreateCompatibleDC.Call(screenDC)
+	if memDC == 0 {
+		return fmt.Errorf("failed to create memory DC")
+	}
+	defer procDeleteDC.Call(memDC)
+
+	// We'll create the DIB section when we get the first page (we know dimensions then)
+	var reusableBitmap uintptr
+	var reusableOldBitmap uintptr
+	var reusablePBits uintptr
+	dibSectionCreated := false
 
 	for img := range pageChan {
 		pageNum++
@@ -744,8 +948,8 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 			return fmt.Errorf("page %d: received nil image from channel", pageNum)
 		}
 
-		// Save debug images asynchronously using the COPY
-		// go func(image *image.Gray, pageNumber int, jobID string) {
+		// // Save debug images asynchronously using the COPY
+		// go func(image *image.RGBA, pageNumber int, jobID string) {
 		// 	if err := saveRenderedImageForDebug(image, pageNumber, jobID); err != nil {
 		// 		log.Printf("Warning: Failed to save debug image for page %d: %v", pageNumber, err)
 		// 	}
@@ -792,9 +996,13 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 		log.Printf("Page %d: Resizing from %dx%d (300 DPI) to %dx%d (fit to printable area %dx%d)",
 			pageNum, imgWidth, imgHeight, targetWidthPx, targetHeightPx, pageWidthPx, pageHeightPx)
 
-		// Resize the image efficiently
-		resizedImg := resizeGrayscale(img, targetWidthPx, targetHeightPx)
-
+		// Resize the image using FAST nearest neighbor (3-5x faster than bilinear)
+		resizedImg := resizeRGBAFast(img, targetWidthPx, targetHeightPx)
+		// CRITICAL: Validate resize result to prevent crashes
+		if resizedImg == nil {
+			return fmt.Errorf("page %d: failed to resize image from %dx%d to %dx%d",
+				pageNum, imgWidth, imgHeight, targetWidthPx, targetHeightPx)
+		}
 		// Update dimensions to use resized image
 		img = resizedImg
 		bounds = img.Bounds()
@@ -835,132 +1043,119 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 
 		log.Printf("Page %d: Started page", pageNum)
 
-		// Create 8-bit grayscale DIB with proper DWORD-aligned stride
-		// Windows DIB requires scan lines to be DWORD-aligned (multiple of 4 bytes)
-		stride := (imgWidth + 3) & ^3 // Round up to multiple of 4
-		imageData := make([]byte, stride*imgHeight)
+		// CRITICAL: Use 24-bit RGB DIB - directly from RGBA rendered image
+		// This provides maximum printer compatibility across all models including Ricoh
+		stride := ((imgWidth*3 + 3) & ^3) // 3 bytes per pixel (RGB), DWORD-aligned
 
-		// Copy grayscale data with stride alignment (top-down format)
-		// FIXED: Separate stride compatibility from bounds checking
-		needsPixelByPixel := img.Stride != imgWidth || bounds.Min.X != 0 || bounds.Min.Y != 0
+		// CRITICAL: Set stretch mode for better image quality
+		procSetStretchBltMode.Call(hDC, HALFTONE) // HALFTONE = 4
 
-		log.Printf("Page %d: Copy strategy - needsPixelByPixel=%v, imgStride=%d, imgWidth=%d, bounds.Min=(%d,%d)",
-			pageNum, needsPixelByPixel, img.Stride, imgWidth, bounds.Min.X, bounds.Min.Y)
+		// Create DIB section on first page only
+		if !dibSectionCreated {
+			log.Printf("Creating reusable DIB section for %dx%d bitmap", imgWidth, imgHeight)
 
-		if !needsPixelByPixel {
-			// Optimized path: direct copy when stride matches and bounds at (0,0)
-			// Top-down DIB: copy rows in natural order (no flip)
-			if len(img.Pix) < img.Stride*imgHeight {
-				log.Printf("ERROR: Insufficient source data for direct copy on page %d", pageNum)
-				return fmt.Errorf("page %d: insufficient source pixel data", pageNum)
+			// Create 24-bit RGB bitmap info (no palette needed)
+			bmi := &struct {
+				BmiHeader BITMAPINFOHEADER
+			}{}
+
+			bmi.BmiHeader.BiSize = uint32(unsafe.Sizeof(BITMAPINFOHEADER{}))
+			bmi.BmiHeader.BiWidth = int32(imgWidth)
+			bmi.BmiHeader.BiHeight = int32(imgHeight) // POSITIVE = bottom-up DIB (standard)
+			bmi.BmiHeader.BiPlanes = 1
+			bmi.BmiHeader.BiBitCount = 24 // 24-bit RGB (3 bytes per pixel)
+			bmi.BmiHeader.BiCompression = BI_RGB
+			bmi.BmiHeader.BiSizeImage = uint32(stride * imgHeight)
+			bmi.BmiHeader.BiXPelsPerMeter = 3780 // 96 DPI (96 * 39.37 inches/meter)
+			bmi.BmiHeader.BiYPelsPerMeter = 3780 // 96 DPI
+			bmi.BmiHeader.BiClrUsed = 0          // No palette for 24-bit
+			bmi.BmiHeader.BiClrImportant = 0
+
+			// Create DIB section - this creates a bitmap we can write pixel data to directly
+			reusableBitmap, _, _ = procCreateDIBSection.Call(
+				memDC,
+				uintptr(unsafe.Pointer(bmi)),
+				DIB_RGB_COLORS,
+				uintptr(unsafe.Pointer(&reusablePBits)),
+				0,
+				0)
+
+			if reusableBitmap == 0 || reusablePBits == 0 {
+				return fmt.Errorf("failed to create reusable DIB section (GDI resource limit?)")
 			}
-			for y := 0; y < imgHeight; y++ {
-				srcOffset := y * img.Stride
-				dstOffset := y * stride
-				if srcOffset+imgWidth > len(img.Pix) {
-					log.Printf("ERROR: Page %d row %d would read past buffer end", pageNum, y)
-					return fmt.Errorf("page %d: buffer overrun at row %d", pageNum, y)
+
+			// Select DIB section into memory DC - do this ONCE
+			reusableOldBitmap, _, _ = procSelectObject.Call(memDC, reusableBitmap)
+			dibSectionCreated = true
+
+			// Cleanup at end of print job
+			defer func() {
+				if dibSectionCreated {
+					procSelectObject.Call(memDC, reusableOldBitmap)
+					procDeleteObject.Call(reusableBitmap)
 				}
-				copy(imageData[dstOffset:dstOffset+imgWidth], img.Pix[srcOffset:srcOffset+imgWidth])
-			}
-		} else {
-			// Safe path: pixel-by-pixel copy
-			for y := 0; y < imgHeight; y++ {
-				rowOffset := y * stride
-				for x := 0; x < imgWidth; x++ {
-					pixel := img.GrayAt(bounds.Min.X+x, bounds.Min.Y+y)
-					imageData[rowOffset+x] = pixel.Y
-				}
+			}()
+
+			log.Printf("Reusable DIB section created successfully")
+		}
+
+		// Copy image data to the reusable DIB section
+		log.Printf("Page %d: Fast-copying RGBA to reusable BGR DIB section", pageNum)
+
+		// CRITICAL: Validate pBits before unsafe pointer operation
+		if reusablePBits == 0 {
+			return fmt.Errorf("DIB section pBits is NULL for page %d", pageNum)
+		}
+
+		// OPTIMIZED: Ultra-fast RGBA to BGR conversion with better cache locality
+		// DIB sections are bottom-up, so we need to flip rows
+		destSlice := (*[1 << 30]byte)(unsafe.Pointer(reusablePBits))[: stride*imgHeight : stride*imgHeight]
+		srcPix := img.Pix
+
+		// Fast conversion with improved memory access pattern
+		for y := 0; y < imgHeight; y++ {
+			// Bottom-up DIB: flip row order
+			destRowStart := (imgHeight - 1 - y) * stride
+			srcRowStart := y * img.Stride
+
+			// Process row in single pass for better cache performance
+			destIdx := destRowStart
+			srcIdx := srcRowStart
+			for x := 0; x < imgWidth; x++ {
+				// BGR order for Windows DIB (skip alpha)
+				destSlice[destIdx] = srcPix[srcIdx+2]   // B
+				destSlice[destIdx+1] = srcPix[srcIdx+1] // G
+				destSlice[destIdx+2] = srcPix[srcIdx]   // R
+				destIdx += 3
+				srcIdx += 4
 			}
 		}
 
-		log.Printf("Page %d: DIB created - stride=%d, imgStride=%d, dataSize=%d",
-			pageNum, stride, img.Stride, len(imageData))
-
-		// CRITICAL: Validate imageData was actually populated (not all zeros)
-		hasData := false
-		for i := 0; i < len(imageData) && i < 1000; i++ {
-			if imageData[i] != 0 {
-				hasData = true
-				break
-			}
-		}
-		if !hasData {
-			log.Printf("WARNING: Page %d imageData appears to be all zeros (blank)", pageNum)
-			// Don't fail - might be a legitimately blank page, but log it
-		}
-
-		// CRITICAL: Add memory barrier to ensure all data is written before GDI reads it
 		runtime.KeepAlive(img)
-		runtime.KeepAlive(imageData)
+		runtime.KeepAlive(srcPix)
 
-		// Create bitmap info with 256-color grayscale palette
-		paletteSize := 256
-		bmi := &struct {
-			BmiHeader BITMAPINFOHEADER
-			BmiColors [256]RGBQUAD
-		}{}
+		// Now BitBlt from memory DC to printer DC
+		log.Printf("Page %d: BitBlt from DIB section to printer DC at offset (%d, %d), size %dx%d",
+			pageNum, offsetX, offsetY, destWidth, destHeight)
 
-		bmi.BmiHeader.BiSize = uint32(unsafe.Sizeof(BITMAPINFOHEADER{}))
-		bmi.BmiHeader.BiWidth = int32(imgWidth)
-		bmi.BmiHeader.BiHeight = -int32(imgHeight) // NEGATIVE = top-down DIB (standard, no flip needed)
-		bmi.BmiHeader.BiPlanes = 1
-		bmi.BmiHeader.BiBitCount = 8
-		bmi.BmiHeader.BiCompression = BI_RGB
-		bmi.BmiHeader.BiSizeImage = uint32(stride * imgHeight)
-		bmi.BmiHeader.BiClrUsed = uint32(paletteSize)
-		bmi.BmiHeader.BiClrImportant = 0
+		retBlt, _, _ := procBitBlt.Call(
+			hDC, // Destination: printer DC
+			uintptr(offsetX), uintptr(offsetY),
+			uintptr(destWidth), uintptr(destHeight),
+			memDC, // Source: memory DC with DIB section
+			0, 0,  // Source position
+			SRCCOPY)
 
-		// Create grayscale palette (0-255 maps to black-white)
-		for i := 0; i < paletteSize; i++ {
-			bmi.BmiColors[i].RgbBlue = uint8(i)
-			bmi.BmiColors[i].RgbGreen = uint8(i)
-			bmi.BmiColors[i].RgbRed = uint8(i)
-			bmi.BmiColors[i].RgbReserved = 0
+		if retBlt == 0 {
+			return fmt.Errorf("BitBlt to printer DC failed for page %d", pageNum)
 		}
 
-		// CRITICAL: Validate bitmap info is correct
-		if bmi.BmiHeader.BiSizeImage != uint32(stride*imgHeight) {
-			log.Printf("ERROR: BiSizeImage mismatch: %d != %d", bmi.BmiHeader.BiSizeImage, stride*imgHeight)
-		}
+		log.Printf("Page %d: Successfully transferred image to printer DC via BitBlt", pageNum)
 
-		// CRITICAL: Ensure all data structures are fully written before syscall
-		runtime.KeepAlive(bmi)
-		runtime.KeepAlive(imageData)
-
-		log.Printf("Page %d: Calling StretchDIBits with %d bytes of image data", pageNum, len(imageData))
-
-		// Print the image - CRITICAL: Use destWidth/destHeight for scaling to printer DPI
-		// This scales the 150 DPI rendered image to fit the page at printer's native DPI
-		ret, _, err = procStretchDIBits.Call(
-			hDC,
-			uintptr(offsetX), uintptr(offsetY), // Destination position (centered)
-			uintptr(destWidth), uintptr(destHeight), // Destination size (scaled to printer DPI)
-			0, 0, // Source position (0,0)
-			uintptr(imgWidth), uintptr(imgHeight), // Source size (150 DPI image)
-			uintptr(unsafe.Pointer(&imageData[0])),
-			uintptr(unsafe.Pointer(bmi)),
-			DIB_RGB_COLORS,
-			SRCCOPY) // 1:1 copy, no stretch
-
-		// Keep imageData and bmi alive until syscall completes
-		runtime.KeepAlive(imageData)
-		runtime.KeepAlive(bmi)
-
-		// StretchDIBits returns scan lines on success, GDI_ERROR on failure
-		if int32(ret) == -1 {
-			log.Printf("ERROR: StretchDIBits failed for page %d", pageNum)
-			return fmt.Errorf("failed to StretchDIBits for page %d: %v", pageNum, err)
-		}
-
-		log.Printf("Page %d: StretchDIBits returned %d scan lines", pageNum, ret)
-
-		// CRITICAL: Flush GDI and wait to ensure all drawing commands are processed
-		// Increased delay prevents printer driver corruption
+		// CRITICAL: Flush GDI to ensure BitBlt completes
 		procGdiFlush.Call()
-		time.Sleep(50 * time.Millisecond) // Increased from 50ms for better reliability
 
-		// End page - CRITICAL: Must complete before moving to next page
+		// End page immediately - no need for long waits since we're reusing objects
 		ret, _, err = procEndPage.Call(hDC)
 		if ret <= 0 {
 			// Abort document on error
@@ -969,9 +1164,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 			return fmt.Errorf("failed to end page %d: %v", pageNum, err)
 		}
 
-		// CRITICAL: Increased delay between pages to ensure driver processes fully
-		// Prevents garbage output from pages being sent too quickly
-		time.Sleep(50 * time.Millisecond) // Increased from 150ms
+		// OPTIMIZED: No delay needed - GdiFlush + EndPage provide sufficient synchronization
 
 		console.MsgChan <- Message{
 			Text:  fmt.Sprintf("✓ Page %d/%d printed successfully", pageNum, numPages),
@@ -1001,7 +1194,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.Gra
 // Removed unused thermal printer functions - using universal printing instead
 
 // renderPDFPageToMonochrome renders PDF directly at target DPI without scaling
-func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int, mutex *sync.Mutex) (*image.Gray, error) {
+func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int, mutex *sync.Mutex) (*image.RGBA, error) {
 	// Only lock for GetPage - the PDF reader is not thread-safe
 	mutex.Lock()
 	page, err := pdfReader.GetPage(pageNum)
@@ -1024,58 +1217,55 @@ func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pa
 		return nil, fmt.Errorf("render page %d at target DPI: %w", pageNum, err)
 	}
 
-	// Verify rendered image is not empty
-	// imgBounds := img.Bounds()
-	// log.Printf("Page %d: Rendered image bounds: %v (expected width: %d)", pageNum, imgBounds, widthPx)
-
-	// Convert to grayscale using standard library for best quality
+	// Convert to RGBA with white background for better printer compatibility
+	// RGBA works better with Ricoh printers than grayscale palette-based formats
 	bounds := img.Bounds()
-	// CRITICAL FIX: Always create image with (0,0) origin for consistent addressing
-	// This prevents corruption from non-zero Min bounds
-	grayImg := image.NewGray(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	// CRITICAL: Always create image with (0,0) origin for consistent addressing
+	rgbaImg := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 
 	// Diagnostic: Count pixels to detect blank/transparent images
 	// pixelCount := 0
 	// nonWhitePixels := 0
 
 	// FIXED: Iterate using dimensions, not source bounds
-	// This ensures proper addressing even if source has non-zero Min
+	// Convert to RGBA with white background (better for printers)
 	for y := 0; y < bounds.Dy(); y++ {
 		for x := 0; x < bounds.Dx(); x++ {
 			// Read from source with offset
 			srcX := bounds.Min.X + x
 			srcY := bounds.Min.Y + y
 			originalColor := img.At(srcX, srcY)
-			grayColor := color.GrayModel.Convert(originalColor)
-			gray := grayColor.(color.Gray)
 
-			// Count non-white pixels to detect if image has content
-			// pixelCount++
-			// if gray.Y < 250 { // Not white (allowing for slight variations)
-			// 	nonWhitePixels++
-			// }
+			// Convert to RGBA - preserve original colors for better rendering
+			rgbaColor := color.RGBAModel.Convert(originalColor)
+			rgba := rgbaColor.(color.RGBA)
+
+			// Ensure fully opaque (alpha=255) for printer compatibility
+			if rgba.A == 0 {
+				// Transparent pixels become white
+				rgba = color.RGBA{R: 255, G: 255, B: 255, A: 255}
+			} else if rgba.A < 255 {
+				// Blend semi-transparent pixels with white background
+				alpha := float64(rgba.A) / 255.0
+				rgba.R = uint8(float64(rgba.R)*alpha + 255.0*(1.0-alpha))
+				rgba.G = uint8(float64(rgba.G)*alpha + 255.0*(1.0-alpha))
+				rgba.B = uint8(float64(rgba.B)*alpha + 255.0*(1.0-alpha))
+				rgba.A = 255
+			}
 
 			// Write to normalized (0,0)-based destination
-			grayImg.SetGray(x, y, gray)
+			rgbaImg.SetRGBA(x, y, rgba)
 		}
 	}
 
-	// Log diagnostic info about image content
-	// percentageNonWhite := float64(nonWhitePixels) * 100.0 / float64(pixelCount)
-	// log.Printf("Page %d: Rendered image has %d/%d non-white pixels (%.2f%%) - checking for 8-bit images",
-	// 	pageNum, nonWhitePixels, pixelCount, percentageNonWhite)
+	log.Printf("Page %d: Converted to RGBA with dimensions %dx%d", pageNum, bounds.Dx(), bounds.Dy())
 
-	// if percentageNonWhite < 0.1 {
-	// 	log.Printf("WARNING: Page %d appears mostly blank (%.2f%% non-white) - possible 8-bit image rendering issue",
-	// 		pageNum, percentageNonWhite)
-	// }
-
-	return grayImg, nil
+	return rgbaImg, nil
 }
 
 // saveRenderedImageForDebug saves a rendered image to the out folder for debugging
 // This helps identify if issues are in rendering or printing stages
-func saveRenderedImageForDebug(img *image.Gray, pageNum int, jobID string) error {
+func saveRenderedImageForDebug(img *image.RGBA, pageNum int, jobID string) error {
 	// Create out folder if it doesn't exist
 	outDir := "out"
 	if err := os.MkdirAll(outDir, 0755); err != nil {
@@ -1148,6 +1338,7 @@ func testPrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 	if err == nil {
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
+			JobName:          printCmd.JobName,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "test-print",
@@ -1178,6 +1369,7 @@ func LivePrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 	if err == nil {
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
+			JobName:          printCmd.JobName,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "live-print",
@@ -1208,6 +1400,7 @@ func SpecimenPrint(console *Console, printManager *PrintManager, printCmd *Print
 	if err == nil {
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
+			JobName:          printCmd.JobName,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "specimen-print",
@@ -1392,8 +1585,9 @@ func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jo
 	monitoringActive := true
 
 	// Monitor loop - runs until job completes or fails
+	// OPTIMIZED: Reduced from 150ms to 500ms to minimize spooler contention
 	for monitoringActive {
-		time.Sleep(150 * time.Millisecond) // Check every 150ms
+		time.Sleep(500 * time.Millisecond) // Check every 500ms (was 150ms)
 
 		// Check if job still exists in tracker
 		if _, ok := printEventTracker.Load(strconv.Itoa(queueID)); !ok {
@@ -2033,6 +2227,9 @@ func encryptData(data []byte, key []byte) ([]byte, error) {
 
 	// Generate a random IV
 	cipherData := make([]byte, aes.BlockSize+len(data))
+	if len(cipherData) < aes.BlockSize {
+		return nil, errors.New("cipherData buffer too small")
+	}
 	iv := cipherData[:aes.BlockSize]
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
@@ -2040,6 +2237,9 @@ func encryptData(data []byte, key []byte) ([]byte, error) {
 
 	// Encrypt the data
 	stream := cipher.NewCFBEncrypter(block, iv)
+	if len(cipherData) < aes.BlockSize+len(data) {
+		return nil, errors.New("cipherData buffer size mismatch")
+	}
 	stream.XORKeyStream(cipherData[aes.BlockSize:], data)
 
 	return cipherData, nil
@@ -2113,12 +2313,21 @@ func decryptData(data []byte, key []byte) ([]byte, error) {
 var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	winspool = syscall.NewLazyDLL("winspool.drv")
+	user32   = syscall.NewLazyDLL("user32.dll")
 
 	// GDI APIs for direct printing
-	procCreateDC      = gdi32.NewProc("CreateDCW")
-	procDeleteDC      = gdi32.NewProc("DeleteDC")
-	procResetDC       = gdi32.NewProc("ResetDCW")
-	procStretchDIBits = gdi32.NewProc("StretchDIBits")
+	procCreateDC               = gdi32.NewProc("CreateDCW")
+	procDeleteDC               = gdi32.NewProc("DeleteDC")
+	procResetDC                = gdi32.NewProc("ResetDCW")
+	procStretchDIBits          = gdi32.NewProc("StretchDIBits")
+	procCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
+	procCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
+	procSelectObject           = gdi32.NewProc("SelectObject")
+	procDeleteObject           = gdi32.NewProc("DeleteObject")
+	procBitBlt                 = gdi32.NewProc("BitBlt")
+	procCreateDIBSection       = gdi32.NewProc("CreateDIBSection")
+	procGetDC                  = user32.NewProc("GetDC")
+	procReleaseDC              = user32.NewProc("ReleaseDC")
 
 	// Page size and device capability APIs
 	procGetDeviceCaps     = gdi32.NewProc("GetDeviceCaps")
@@ -2249,7 +2458,203 @@ const (
 	JOB_STATUS_BLOCKED_DEVQ      = 0x00000200
 	JOB_STATUS_USER_INTERVENTION = 0x00000400
 	JOB_STATUS_RESTART           = 0x00000800
+
+	// DEVMODE field flags
+	DM_ORIENTATION   = 0x00000001
+	DM_PAPERSIZE     = 0x00000002
+	DM_PAPERLENGTH   = 0x00000004
+	DM_PAPERWIDTH    = 0x00000008
+	DM_DEFAULTSOURCE = 0x00000200
+	DM_COPIES        = 0x00000100
+	DM_DUPLEX        = 0x00001000
+
+	// Paper size constants (Windows DMPAPER_* values)
+	DMPAPER_LETTER = 1   // 8.5 x 11 inches
+	DMPAPER_A4     = 9   // 210 x 297 mm
+	DMPAPER_USER   = 256 // Custom size
+
+	// Orientation constants
+	DMORIENT_PORTRAIT  = 1
+	DMORIENT_LANDSCAPE = 2
+
+	// Duplex constants
+	DMDUP_SIMPLEX    = 1 // Single-sided printing
+	DMDUP_VERTICAL   = 2 // Duplex on long edge
+	DMDUP_HORIZONTAL = 3 // Duplex on short edge
+
+	// Default tray source
+	DMBIN_AUTO = 7 // Automatically select appropriate tray based on paper size
 )
+
+// DEVMODE structure for printer configuration (simplified version for Windows)
+type DEVMODE struct {
+	DeviceName       [32]uint16
+	SpecVersion      uint16
+	DriverVersion    uint16
+	Size             uint16
+	DriverExtra      uint16
+	Fields           uint32
+	Orientation      int16
+	PaperSize        int16
+	PaperLength      int16
+	PaperWidth       int16
+	Scale            int16
+	Copies           int16
+	DefaultSource    int16
+	PrintQuality     int16
+	Color            int16
+	Duplex           int16
+	YResolution      int16
+	TTOption         int16
+	Collate          int16
+	FormName         [32]uint16
+	LogPixels        uint16
+	BitsPerPel       uint32
+	PelsWidth        uint32
+	PelsHeight       uint32
+	DisplayFlags     uint32
+	DisplayFrequency uint32
+	ICMMethod        uint32
+	ICMIntent        uint32
+	MediaType        uint32
+	DitherType       uint32
+	Reserved1        uint32
+	Reserved2        uint32
+	PanningWidth     uint32
+	PanningHeight    uint32
+}
+
+// resizeRGBA efficiently resizes an RGBA image using bilinear interpolation
+// resizeRGBAFast uses nearest neighbor for maximum speed (3-5x faster than bilinear)
+func resizeRGBAFast(src *image.RGBA, targetWidth, targetHeight int) *image.RGBA {
+	if src == nil || targetWidth <= 0 || targetHeight <= 0 {
+		return nil
+	}
+
+	srcBounds := src.Bounds()
+	srcWidth := srcBounds.Dx()
+	srcHeight := srcBounds.Dy()
+
+	if srcWidth <= 0 || srcHeight <= 0 {
+		return nil
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+	xRatio := float64(srcWidth) / float64(targetWidth)
+	yRatio := float64(srcHeight) / float64(targetHeight)
+
+	// Nearest neighbor - very fast, good enough for printing
+	for y := 0; y < targetHeight; y++ {
+		srcY := int(float64(y) * yRatio)
+		if srcY >= srcHeight {
+			srcY = srcHeight - 1
+		}
+		dstOffset := dst.PixOffset(0, y)
+		srcOffset := src.PixOffset(srcBounds.Min.X, srcBounds.Min.Y+srcY)
+
+		for x := 0; x < targetWidth; x++ {
+			srcX := int(float64(x) * xRatio)
+			if srcX >= srcWidth {
+				srcX = srcWidth - 1
+			}
+			srcIdx := srcOffset + srcX*4
+			dstIdx := dstOffset + x*4
+
+			// Fast 4-byte copy (RGBA)
+			dst.Pix[dstIdx] = src.Pix[srcIdx]
+			dst.Pix[dstIdx+1] = src.Pix[srcIdx+1]
+			dst.Pix[dstIdx+2] = src.Pix[srcIdx+2]
+			dst.Pix[dstIdx+3] = src.Pix[srcIdx+3]
+		}
+	}
+
+	return dst
+}
+
+func resizeRGBA(src *image.RGBA, targetWidth, targetHeight int) *image.RGBA {
+	// CRITICAL: Validate inputs to prevent crashes
+	if src == nil {
+		log.Printf("ERROR: resizeRGBA called with nil source image")
+		return nil
+	}
+	if targetWidth <= 0 || targetHeight <= 0 {
+		log.Printf("ERROR: resizeRGBA called with invalid target dimensions: %dx%d", targetWidth, targetHeight)
+		return nil
+	}
+
+	srcBounds := src.Bounds()
+	srcWidth := srcBounds.Dx()
+	srcHeight := srcBounds.Dy()
+
+	// CRITICAL: Validate source dimensions
+	if srcWidth <= 0 || srcHeight <= 0 {
+		log.Printf("ERROR: resizeRGBA source image has invalid dimensions: %dx%d", srcWidth, srcHeight)
+		return nil
+	}
+
+	// Create destination image
+	dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+
+	// Calculate scaling factors
+	xScale := float64(srcWidth) / float64(targetWidth)
+	yScale := float64(srcHeight) / float64(targetHeight)
+
+	// Bilinear interpolation for better quality
+	for y := 0; y < targetHeight; y++ {
+		for x := 0; x < targetWidth; x++ {
+			// Map destination pixel to source coordinates
+			srcX := float64(x) * xScale
+			srcY := float64(y) * yScale
+
+			// Get integer parts
+			x0 := int(srcX)
+			y0 := int(srcY)
+			x1 := x0 + 1
+			y1 := y0 + 1
+
+			// Clamp to bounds
+			if x1 >= srcWidth {
+				x1 = srcWidth - 1
+			}
+			if y1 >= srcHeight {
+				y1 = srcHeight - 1
+			}
+
+			// Get fractional parts
+			fx := srcX - float64(x0)
+			fy := srcY - float64(y0)
+
+			// Get four neighboring pixels
+			p00 := src.RGBAAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y0)
+			p10 := src.RGBAAt(srcBounds.Min.X+x1, srcBounds.Min.Y+y0)
+			p01 := src.RGBAAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y1)
+			p11 := src.RGBAAt(srcBounds.Min.X+x1, srcBounds.Min.Y+y1)
+
+			// Bilinear interpolation for each channel
+			r := interpolate(float64(p00.R), float64(p10.R), float64(p01.R), float64(p11.R), fx, fy)
+			g := interpolate(float64(p00.G), float64(p10.G), float64(p01.G), float64(p11.G), fx, fy)
+			b := interpolate(float64(p00.B), float64(p10.B), float64(p01.B), float64(p11.B), fx, fy)
+			a := interpolate(float64(p00.A), float64(p10.A), float64(p01.A), float64(p11.A), fx, fy)
+
+			// Set destination pixel
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8(r + 0.5),
+				G: uint8(g + 0.5),
+				B: uint8(b + 0.5),
+				A: uint8(a + 0.5),
+			})
+		}
+	}
+
+	return dst
+}
+
+// interpolate performs bilinear interpolation for a single channel
+func interpolate(p00, p10, p01, p11, fx, fy float64) float64 {
+	p0 := p00*(1-fx) + p10*fx
+	p1 := p01*(1-fx) + p11*fx
+	return p0*(1-fy) + p1*fy
+}
 
 // resizeGrayscale efficiently resizes a grayscale image using bilinear interpolation
 func resizeGrayscale(src *image.Gray, targetWidth, targetHeight int) *image.Gray {
