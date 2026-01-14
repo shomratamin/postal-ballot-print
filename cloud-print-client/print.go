@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -37,6 +38,7 @@ var query_auto_print_log = true
 type PrintJob struct {
 	PrinterName      string
 	PrintOrientation string
+	JobType          string
 	JobName          string
 	Data             []byte // Data to be printed
 	Token            string // Job token
@@ -47,6 +49,14 @@ type PrintJob struct {
 	Barcode          string
 	Mashul           string
 	Weight           string
+}
+
+// PageResult represents a rendered page result from the producer pipeline
+type PageResult struct {
+	jobID   string // Job identifier for isolation
+	pageNum int
+	img     *image.RGBA
+	err     error
 }
 
 const (
@@ -339,14 +349,6 @@ func (pm *PrintManager) processPDFPagesWithFixedDPI(pdfReader *model.PdfReader, 
 // printWithPipeline implements a producer-consumer pipeline for efficient rendering and printing
 // CRITICAL: Printer is initialized ONLY after first page is ready to prevent driver corruption
 func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages int, job PrintJob, console *Console, widthPx, heightPx int) error {
-	// Ordered page delivery system
-	type PageResult struct {
-		jobID   string // Job identifier for isolation
-		pageNum int
-		img     *image.RGBA
-		err     error
-	}
-
 	// Channel for rendering results (unordered)
 	resultChan := make(chan PageResult, numPages)
 	// Channel for ordered page delivery to printer
@@ -356,7 +358,9 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 	// Signal channel to indicate first page is ready
 	firstPageReady := make(chan struct{})
 
-	log.Printf("Starting render pipeline before printer initialization...")
+	// Timing tracking
+	pipelineStartTime := time.Now()
+	log.Printf("[TIMING] Pipeline initialization started at %v", pipelineStartTime.Format("15:04:05.000"))
 
 	console.MsgChan <- Message{
 		Text:  fmt.Sprintf("Starting %d page render pipeline...", numPages),
@@ -368,98 +372,75 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		maxWorkers = maxWorkers - 1 // Leave one CPU free
 	}
 
-	// CRITICAL FIX: Mutex to protect pdfReader access - it's NOT thread-safe
-	var pdfReaderMutex sync.Mutex
-
-	// Producer: Render pages concurrently (with serialized PDF access)
-	semaphore := make(chan struct{}, maxWorkers)
 	var renderWg sync.WaitGroup
+	var resultsSent int32 // Atomic counter for successful sends
 
-	// Launch render goroutines in background so we don't block the printer
-	// Launch rendering goroutines
-	go func() {
-		for pageNum := 1; pageNum <= numPages; pageNum++ {
-			// CRITICAL: Add to WaitGroup BEFORE launching goroutine
-			// This prevents renderWg.Wait() from returning before goroutines start
-			renderWg.Add(1)
+	producerStart := time.Now()
+	log.Printf("[TIMING] Starting page 1 render (solo) at %v", producerStart.Format("15:04:05.000"))
 
-			go func(pNum int) {
-				// CRITICAL: Defer order matters - defers execute in LIFO order
-				// 1. renderWg.Done() called LAST (executes first in defer chain)
-				// 2. Semaphore release (executes second)
-				// 3. Panic recovery (executes third - innermost)
+	// CRITICAL: Render page 1 FIRST and send it so printer can start initializing
+	if numPages > 0 {
 
-				// Signal completion FIRST in defer chain (executes LAST)
-				// This is placed first so it runs after all other defers complete
-				defer renderWg.Done()
-
-				// Release semaphore before WaitGroup - ensures semaphore doesn't block completion
-				defer func() {
-					<-semaphore
-				}()
-
-				// Panic recovery - must not send to channel after renderWg.Done()
-				// Instead, log the error and let the goroutine exit
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("PANIC in render goroutine page %d: %v (goroutine exiting)", pNum, r)
-						// DO NOT send to resultChan here - channel may be closed
-						// The sequencer will timeout waiting for this page
-					}
-				}()
-
-				console.MsgChan <- Message{
-					Text:  fmt.Sprintf("Rendering page %d/%d...", pNum, numPages),
-					Color: colorNRGBA(0, 255, 255, 255), // Cyan
-				}
-
-				// Pass mutex to the render function - it will lock only for GetPage()
-				img, err := pm.renderPDFPageToMonochrome(pdfReader, pNum, widthPx, heightPx, &pdfReaderMutex)
-
-				// Acquire semaphore AFTER starting work to avoid blocking the launch loop
-				semaphore <- struct{}{}
-
-				if err != nil {
-					log.Printf("ERROR rendering page %d: %v", pNum, err)
-					// CRITICAL: Send to channel BEFORE defer chain executes
-					resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: err}
-					return
-				}
-
-				// Validate image before sending
-				if img == nil || img.Pix == nil || len(img.Pix) == 0 {
-					log.Printf("ERROR: page %d rendered nil or empty image", pNum)
-					resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}
-					return
-				}
-
-				// CRITICAL FIX: Create deep copy IMMEDIATELY after rendering to prevent memory corruption
-				// This ensures each page has its own independent memory buffer
-				imgCopy := &image.RGBA{
-					Pix:    make([]byte, len(img.Pix)),
-					Stride: img.Stride,
-					Rect:   img.Rect,
-				}
-				copy(imgCopy.Pix, img.Pix)
-
-				log.Printf("Page %d: Created deep copy - Pix size: %d, Stride: %d, Rect: %v",
-					pNum, len(imgCopy.Pix), imgCopy.Stride, imgCopy.Rect)
-
-				console.MsgChan <- Message{
-					Text:  fmt.Sprintf("✓ Page %d/%d rendered (%dx%d)", pNum, numPages, imgCopy.Bounds().Dx(), imgCopy.Bounds().Dy()),
-					Color: colorNRGBA(0, 255, 0, 255), // Green
-				}
-
-				// CRITICAL: Send result BEFORE defer chain starts unwinding
-				// This ensures send completes before renderWg.Done() is called
-				resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: imgCopy, err: nil}
-			}(pageNum)
+		console.MsgChan <- Message{
+			Text:  "Rendering page 1 (priority)...",
+			Color: colorNRGBA(0, 255, 255, 255), // Cyan
 		}
-	}()
 
-	// Close result channel after all rendering completes
+		page1Start := time.Now()
+		img, err := pm.renderPDFPageDirect(pdfReader, 1, widthPx, heightPx)
+		page1Duration := time.Since(page1Start)
+
+		if err != nil {
+			log.Printf("[ERROR] Page 1: Rendering failed after %v: %v", page1Duration, err)
+			resultChan <- PageResult{jobID: job.JobID, pageNum: 1, img: nil, err: err}
+			atomic.AddInt32(&resultsSent, 1)
+		} else if img == nil || img.Pix == nil || len(img.Pix) == 0 {
+			log.Printf("[ERROR] Page 1: Rendered nil or empty image")
+			resultChan <- PageResult{jobID: job.JobID, pageNum: 1, img: nil, err: fmt.Errorf("rendered empty image")}
+			atomic.AddInt32(&resultsSent, 1)
+		} else {
+			log.Printf("[TIMING] Page 1: Rendered in %v", page1Duration)
+			console.MsgChan <- Message{
+				Text:  fmt.Sprintf("✓ Page 1/%d rendered (%dx%d)", numPages, img.Bounds().Dx(), img.Bounds().Dy()),
+				Color: colorNRGBA(0, 255, 0, 255), // Green
+			}
+			resultChan <- PageResult{jobID: job.JobID, pageNum: 1, img: img, err: nil}
+			atomic.AddInt32(&resultsSent, 1)
+			log.Printf("[TIMING] Page 1 sent to sequencer, printer can now initialize")
+		}
+	}
+
+	// Now launch workers for remaining pages in round-robin fashion
+	if numPages > 1 {
+		log.Printf("[TIMING] Creating %d workers for pages 2-%d, each with dedicated PDF reader", maxWorkers, numPages)
+
+		for workerID := 1; workerID <= maxWorkers; workerID++ {
+			// Create fresh PDF reader instance per worker (not shared pointer)
+			workerReader, err := model.NewPdfReader(bytes.NewReader(job.Data))
+			if err != nil {
+				return fmt.Errorf("failed to create PDF reader for worker %d: %w", workerID, err)
+			}
+
+			renderWg.Add(1)
+			// Start from workerID+1 since page 1 is already done
+			go pm.renderWorkerRoundRobinFrom(workerID, maxWorkers, 2, numPages, job, workerReader,
+				widthPx, heightPx, resultChan, console, &renderWg, producerStart, &resultsSent)
+		}
+	}
+
+	// Wait for all workers to complete, then close result channel
 	go func() {
 		renderWg.Wait()
+		renderDuration := time.Since(pipelineStartTime)
+
+		// Verify all results were sent
+		sent := atomic.LoadInt32(&resultsSent)
+		if sent == int32(numPages) {
+			log.Printf("[TIMING] All %d workers completed in %v, all %d pages sent, closing resultChan", maxWorkers, renderDuration, sent)
+		} else {
+			log.Printf("[WARNING] Workers completed but only %d/%d pages sent, closing resultChan", sent, numPages)
+		}
+
 		close(resultChan)
 	}()
 
@@ -473,8 +454,10 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 		hasError := false
 		resultsReceived := 0
 		firstPageSignaled := false
+		sequencerStart := time.Now()
 
-		log.Printf("Sequencer: Starting, waiting for %d pages from job %s", numPages, job.JobID)
+		log.Printf("[TIMING] Sequencer: Starting at %v, waiting for %d pages from job %s",
+			sequencerStart.Format("15:04:05.000"), numPages, job.JobID)
 
 		for result := range resultChan {
 			resultsReceived++
@@ -531,7 +514,8 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 					// CRITICAL: Signal when first page is ready (page 1)
 					if nextPageToSend == 1 && !firstPageSignaled {
-						log.Printf("Sequencer: First page ready, signaling printer initialization")
+						timeToFirstPage := time.Since(sequencerStart)
+						log.Printf("[TIMING] Sequencer: First page ready in %v, signaling printer initialization", timeToFirstPage)
 						close(firstPageReady)
 						firstPageSignaled = true
 					}
@@ -574,7 +558,9 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 			}
 		}
 
-		log.Printf("Sequencer finished: sent %d pages, has error: %v, received %d results", nextPageToSend-1, hasError, resultsReceived)
+		sequencerDuration := time.Since(sequencerStart)
+		log.Printf("[TIMING] Sequencer finished in %v: sent %d pages, has error: %v, received %d results",
+			sequencerDuration, nextPageToSend-1, hasError, resultsReceived)
 	}()
 
 	// Consumer: Initialize printer and print pages
@@ -618,9 +604,11 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 	// CRITICAL: Wait for first page to be ready before initializing printer
 	// This prevents the printer driver from being locked in a bad state
+	printerInitStart := time.Now()
 	select {
 	case <-firstPageReady:
-		log.Printf("First page ready - initializing printer now...")
+		waitTime := time.Since(printerInitStart)
+		log.Printf("[TIMING] First page ready after %v - initializing printer now...", waitTime)
 	case <-time.After(60 * time.Second):
 		return fmt.Errorf("timeout waiting for first page to render")
 	}
@@ -813,6 +801,9 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 	log.Printf("Printer DC created successfully")
 
+	printerInitDuration := time.Since(printerInitStart)
+	log.Printf("[TIMING] Printer initialization completed in %v", printerInitDuration)
+
 	// Get printer's ACTUAL printable area - this accounts for hardware margins
 	pageWidthPx, _, _ = procGetDeviceCaps.Call(hDC, HORZRES)
 	pageHeightPx, _, _ = procGetDeviceCaps.Call(hDC, VERTRES)
@@ -867,10 +858,8 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			if hDC != 0 {
 				procGdiFlush.Call()
 				// For reusable DIB approach, shorter wait is sufficient
-				waitTime := 5 * time.Second
-				if numPages > 50 {
-					waitTime = 10 * time.Second
-				}
+				waitTime := 1 * time.Second
+
 				log.Printf("Waiting %v for spooler to process %d pages before ending document", waitTime, numPages)
 				time.Sleep(waitTime)
 				procEndDoc.Call(hDC)
@@ -914,8 +903,9 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 	for img := range pageChan {
 		pageNum++
+		pageStartTime := time.Now()
 
-		log.Printf("Printer received page %d from channel", pageNum)
+		log.Printf("[TIMING] Page %d: Received from channel at %v", pageNum, pageStartTime.Format("15:04:05.000"))
 
 		// Check for rendering errors
 		select {
@@ -926,7 +916,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 		console.MsgChan <- Message{
 			Text:  fmt.Sprintf("Printing page %d/%d...", pageNum, numPages),
-			Color: colorNRGBA(0, 255, 255, 255), // Cyan
+			Color: colorNRGBA(0, 255, 0, 255), // Green
 		}
 
 		// Validate image
@@ -979,11 +969,14 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			targetWidthPx = int(float64(targetHeightPx) * aspectRatio)
 		}
 
-		log.Printf("Page %d: Resizing from %dx%d (300 DPI) to %dx%d (fit to printable area %dx%d)",
+		log.Printf("Page %d: Resizing from %dx%d (200 DPI) to %dx%d (fit to printable area %dx%d)",
 			pageNum, imgWidth, imgHeight, targetWidthPx, targetHeightPx, pageWidthPx, pageHeightPx)
 
 		// Resize the image using FAST nearest neighbor (3-5x faster than bilinear)
+		resizeStart := time.Now()
 		resizedImg := resizeRGBAFast(img, targetWidthPx, targetHeightPx)
+		resizeDuration := time.Since(resizeStart)
+		log.Printf("[TIMING] Page %d: Resize took %v", pageNum, resizeDuration)
 		// CRITICAL: Validate resize result to prevent crashes
 		if resizedImg == nil {
 			return fmt.Errorf("page %d: failed to resize image from %dx%d to %dx%d",
@@ -1094,6 +1087,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 		}
 
 		// OPTIMIZED: Ultra-fast RGBA to BGR conversion with better cache locality
+		conversionStart := time.Now()
 		// DIB sections are bottom-up, so we need to flip rows
 		destSlice := (*[1 << 30]byte)(unsafe.Pointer(reusablePBits))[: stride*imgHeight : stride*imgHeight]
 		srcPix := img.Pix
@@ -1116,6 +1110,8 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 				srcIdx += 4
 			}
 		}
+		conversionDuration := time.Since(conversionStart)
+		log.Printf("[TIMING] Page %d: RGBA->BGR conversion took %v", pageNum, conversionDuration)
 
 		runtime.KeepAlive(img)
 		runtime.KeepAlive(srcPix)
@@ -1124,6 +1120,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 		log.Printf("Page %d: BitBlt from DIB section to printer DC at offset (%d, %d), size %dx%d",
 			pageNum, offsetX, offsetY, destWidth, destHeight)
 
+		bitbltStart := time.Now()
 		retBlt, _, _ := procBitBlt.Call(
 			hDC, // Destination: printer DC
 			uintptr(offsetX), uintptr(offsetY),
@@ -1131,6 +1128,8 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			memDC, // Source: memory DC with DIB section
 			0, 0,  // Source position
 			SRCCOPY)
+		bitbltDuration := time.Since(bitbltStart)
+		log.Printf("[TIMING] Page %d: BitBlt took %v", pageNum, bitbltDuration)
 
 		if retBlt == 0 {
 			return fmt.Errorf("BitBlt to printer DC failed for page %d", pageNum)
@@ -1157,6 +1156,9 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			Color: colorNRGBA(0, 255, 0, 255), // Green
 		}
 
+		pageTotalTime := time.Since(pageStartTime)
+		log.Printf("[TIMING] Page %d: Total print time %v (resize: %v, conversion: %v, bitblt: %v)",
+			pageNum, pageTotalTime, resizeDuration, conversionDuration, bitbltDuration)
 		log.Printf("Successfully printed page %d/%d", pageNum, numPages)
 	}
 
@@ -1179,72 +1181,179 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 // Removed unused thermal printer functions - using universal printing instead
 
-// renderPDFPageToMonochrome renders PDF directly at target DPI without scaling
-func (pm *PrintManager) renderPDFPageToMonochrome(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int, mutex *sync.Mutex) (*image.RGBA, error) {
-	// Only lock for GetPage - the PDF reader is not thread-safe
-	mutex.Lock()
-	page, err := pdfReader.GetPage(pageNum)
-	mutex.Unlock()
+// renderWorkerRoundRobin handles rendering pages in round-robin fashion
+// Each worker processes pages: workerID, workerID+maxWorkers, workerID+2*maxWorkers, etc.
+func (pm *PrintManager) renderWorkerRoundRobin(workerID, maxWorkers, numPages int, job PrintJob,
+	pdfReader *model.PdfReader, widthPx, heightPx int, resultChan chan PageResult,
+	console *Console, renderWg *sync.WaitGroup, producerStart time.Time, resultsSent *int32) {
 
+	defer renderWg.Done()
+
+	workerStart := time.Now()
+	pagesRendered := 0
+
+	log.Printf("[TIMING] Worker %d: Starting at %v", workerID, workerStart.Format("15:04:05.000"))
+
+	// Process pages assigned to this worker: workerID, workerID+maxWorkers, workerID+2*maxWorkers...
+	for pageNum := workerID; pageNum <= numPages; pageNum += maxWorkers {
+		pageStartTime := time.Now()
+
+		console.MsgChan <- Message{
+			Text:  fmt.Sprintf("Worker %d rendering page %d/%d...", workerID, pageNum, numPages),
+			Color: colorNRGBA(0, 255, 255, 255), // Cyan
+		}
+
+		// Render the page (no mutex needed - each worker has own PDF reader)
+		img, err := pm.renderPDFPageDirect(pdfReader, pageNum, widthPx, heightPx)
+		renderDuration := time.Since(pageStartTime)
+
+		if err != nil {
+			log.Printf("[ERROR] Worker %d, Page %d: Rendering failed after %v: %v", workerID, pageNum, renderDuration, err)
+			resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: nil, err: err}
+			atomic.AddInt32(resultsSent, 1) // Count error sends too
+			continue
+		}
+
+		log.Printf("[TIMING] Worker %d, Page %d: Rendered in %v", workerID, pageNum, renderDuration)
+
+		// Validate image
+		if img == nil || img.Pix == nil || len(img.Pix) == 0 {
+			log.Printf("[ERROR] Worker %d, Page %d: Rendered nil or empty image", workerID, pageNum)
+			resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: nil, err: fmt.Errorf("rendered empty image")}
+			atomic.AddInt32(resultsSent, 1) // Count error sends too
+			continue
+		}
+
+		console.MsgChan <- Message{
+			Text:  fmt.Sprintf("✓ Worker %d page %d/%d rendered (%dx%d)", workerID, pageNum, numPages, img.Bounds().Dx(), img.Bounds().Dy()),
+			Color: colorNRGBA(0, 255, 0, 255), // Green
+		}
+
+		// Send result to sequencer
+		resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: img, err: nil}
+		atomic.AddInt32(resultsSent, 1)
+		pagesRendered++
+
+		log.Printf("[TIMING] Worker %d, Page %d: Total time %v (since worker start: %v)",
+			workerID, pageNum, time.Since(pageStartTime), time.Since(workerStart))
+	}
+
+	workerDuration := time.Since(workerStart)
+	log.Printf("[TIMING] Worker %d: Completed %d pages in %v (avg: %v/page)",
+		workerID, pagesRendered, workerDuration, workerDuration/time.Duration(max(1, pagesRendered)))
+}
+
+// renderWorkerRoundRobinFrom handles rendering pages in round-robin fashion starting from a specific page
+// Each worker processes pages: startPage+workerID-1, startPage+workerID-1+maxWorkers, etc.
+func (pm *PrintManager) renderWorkerRoundRobinFrom(workerID, maxWorkers, startPage, numPages int, job PrintJob,
+	pdfReader *model.PdfReader, widthPx, heightPx int, resultChan chan PageResult,
+	console *Console, renderWg *sync.WaitGroup, producerStart time.Time, resultsSent *int32) {
+
+	defer renderWg.Done()
+
+	workerStart := time.Now()
+	pagesRendered := 0
+
+	log.Printf("[TIMING] Worker %d: Starting from page %d at %v", workerID, startPage, workerStart.Format("15:04:05.000"))
+
+	// Process pages assigned to this worker starting from startPage
+	// Worker 1: startPage, startPage+maxWorkers, startPage+2*maxWorkers...
+	// Worker 2: startPage+1, startPage+1+maxWorkers, startPage+1+2*maxWorkers...
+	for pageNum := startPage + workerID - 1; pageNum <= numPages; pageNum += maxWorkers {
+		pageStartTime := time.Now()
+
+		console.MsgChan <- Message{
+			Text:  fmt.Sprintf("Worker %d rendering page %d/%d...", workerID, pageNum, numPages),
+			Color: colorNRGBA(0, 255, 255, 255), // Cyan
+		}
+
+		// Render the page (no mutex needed - each worker has own PDF reader)
+		img, err := pm.renderPDFPageDirect(pdfReader, pageNum, widthPx, heightPx)
+		renderDuration := time.Since(pageStartTime)
+
+		if err != nil {
+			log.Printf("[ERROR] Worker %d, Page %d: Rendering failed after %v: %v", workerID, pageNum, renderDuration, err)
+			resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: nil, err: err}
+			atomic.AddInt32(resultsSent, 1)
+			continue
+		}
+
+		log.Printf("[TIMING] Worker %d, Page %d: Rendered in %v", workerID, pageNum, renderDuration)
+
+		// Validate image
+		if img == nil || img.Pix == nil || len(img.Pix) == 0 {
+			log.Printf("[ERROR] Worker %d, Page %d: Rendered nil or empty image", workerID, pageNum)
+			resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: nil, err: fmt.Errorf("rendered empty image")}
+			atomic.AddInt32(resultsSent, 1)
+			continue
+		}
+
+		console.MsgChan <- Message{
+			Text:  fmt.Sprintf("✓ Worker %d page %d/%d rendered (%dx%d)", workerID, pageNum, numPages, img.Bounds().Dx(), img.Bounds().Dy()),
+			Color: colorNRGBA(0, 255, 0, 255), // Green
+		}
+
+		// Send result to sequencer
+		resultChan <- PageResult{jobID: job.JobID, pageNum: pageNum, img: img, err: nil}
+		atomic.AddInt32(resultsSent, 1)
+		pagesRendered++
+
+		log.Printf("[TIMING] Worker %d, Page %d: Total time %v (since worker start: %v)",
+			workerID, pageNum, time.Since(pageStartTime), time.Since(workerStart))
+	}
+
+	workerDuration := time.Since(workerStart)
+	log.Printf("[TIMING] Worker %d: Completed %d pages in %v (avg: %v/page)",
+		workerID, pagesRendered, workerDuration, workerDuration/time.Duration(max(1, pagesRendered)))
+}
+
+// renderPDFPageDirect renders a PDF page without mutex (for dedicated PDF reader per worker)
+func (pm *PrintManager) renderPDFPageDirect(pdfReader *model.PdfReader, pageNum, widthPx, heightPx int) (*image.RGBA, error) {
+	// No mutex needed - each worker has its own PDF reader
+	page, err := pdfReader.GetPage(pageNum)
 	if err != nil {
 		return nil, fmt.Errorf("get page %d: %w", pageNum, err)
 	}
 
-	// Render directly at target dimensions - no scaling needed
-	// This happens in parallel without mutex lock
+	// Render directly at target dimensions
 	device := render.NewImageDevice()
 	device.OutputWidth = widthPx
 
-	log.Printf("Page %d: Rendering with OutputWidth=%d to capture all content including images", pageNum, widthPx)
+	log.Printf("Page %d: Rendering with OutputWidth=%d", pageNum, widthPx)
 
-	// Render at target DPI directly
+	// Render at target DPI
+	renderStart := time.Now()
 	img, err := device.Render(page)
 	if err != nil {
-		return nil, fmt.Errorf("render page %d at target DPI: %w", pageNum, err)
+		return nil, fmt.Errorf("render page %d: %w", pageNum, err)
 	}
+	renderTime := time.Since(renderStart)
+	log.Printf("[TIMING] Page %d: PDF render took %v", pageNum, renderTime)
 
-	// Convert to RGBA with white background for better printer compatibility
-	// RGBA works better with Ricoh printers than grayscale palette-based formats
+	// Convert to RGBA with white background
+	conversionStart := time.Now()
 	bounds := img.Bounds()
-	// CRITICAL: Always create image with (0,0) origin for consistent addressing
 	rgbaImg := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
 
-	// Diagnostic: Count pixels to detect blank/transparent images
-	// pixelCount := 0
-	// nonWhitePixels := 0
-
-	// FIXED: Iterate using dimensions, not source bounds
-	// Convert to RGBA with white background (better for printers)
 	for y := 0; y < bounds.Dy(); y++ {
 		for x := 0; x < bounds.Dx(); x++ {
-			// Read from source with offset
 			srcX := bounds.Min.X + x
 			srcY := bounds.Min.Y + y
 			originalColor := img.At(srcX, srcY)
-
-			// Convert to RGBA - preserve original colors for better rendering
 			rgbaColor := color.RGBAModel.Convert(originalColor)
 			rgba := rgbaColor.(color.RGBA)
 
-			// Ensure fully opaque (alpha=255) for printer compatibility
 			if rgba.A == 0 {
-				// Transparent pixels become white
-				rgba = color.RGBA{R: 255, G: 255, B: 255, A: 255}
-			} else if rgba.A < 255 {
-				// Blend semi-transparent pixels with white background
-				alpha := float64(rgba.A) / 255.0
-				rgba.R = uint8(float64(rgba.R)*alpha + 255.0*(1.0-alpha))
-				rgba.G = uint8(float64(rgba.G)*alpha + 255.0*(1.0-alpha))
-				rgba.B = uint8(float64(rgba.B)*alpha + 255.0*(1.0-alpha))
+				rgbaImg.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+			} else {
 				rgba.A = 255
+				rgbaImg.SetRGBA(x, y, rgba)
 			}
-
-			// Write to normalized (0,0)-based destination
-			rgbaImg.SetRGBA(x, y, rgba)
 		}
 	}
 
-	log.Printf("Page %d: Converted to RGBA with dimensions %dx%d", pageNum, bounds.Dx(), bounds.Dy())
+	conversionTime := time.Since(conversionStart)
+	log.Printf("[TIMING] Page %d: RGBA conversion took %v", pageNum, conversionTime)
 
 	return rgbaImg, nil
 }
@@ -1325,6 +1434,7 @@ func testPrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
 			JobName:          printCmd.JobName,
+			JobType:          printCmd.JobType,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "test-print",
@@ -1356,6 +1466,7 @@ func LivePrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
 			JobName:          printCmd.JobName,
+			JobType:          printCmd.JobType,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "live-print",
@@ -1387,6 +1498,7 @@ func SpecimenPrint(console *Console, printManager *PrintManager, printCmd *Print
 		printJob := PrintJob{
 			PrinterName:      selectedPrinter,
 			JobName:          printCmd.JobName,
+			JobType:          printCmd.JobType,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "specimen-print",

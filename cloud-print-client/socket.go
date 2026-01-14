@@ -30,6 +30,7 @@ type AuthMessage struct {
 type PrintCommand struct {
 	PrinterID        string  `json:"printer_id"`
 	JobName          string  `json:"job_name"`
+	JobType          string  `json:"job_type"`
 	PrintOrientation string  `json:"print_orientation"`
 	JobID            string  `json:"job_id"`
 	JobToken         string  `json:"job_token"`
