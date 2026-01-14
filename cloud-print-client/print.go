@@ -384,29 +384,28 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 			renderWg.Add(1)
 
 			go func(pNum int) {
-				// CRITICAL: Panic recovery must be outermost defer to handle all panics
-				// renderWg.Done() is called at the END to ensure all channel operations complete first
+				// CRITICAL: Defer order matters - defers execute in LIFO order
+				// 1. renderWg.Done() called LAST (executes first in defer chain)
+				// 2. Semaphore release (executes second)
+				// 3. Panic recovery (executes third - innermost)
+
+				// Signal completion FIRST in defer chain (executes LAST)
+				// This is placed first so it runs after all other defers complete
+				defer renderWg.Done()
+
+				// Release semaphore before WaitGroup - ensures semaphore doesn't block completion
 				defer func() {
-					// Release semaphore
 					<-semaphore
+				}()
 
-					// Recover from any panic to prevent crash
+				// Panic recovery - must not send to channel after renderWg.Done()
+				// Instead, log the error and let the goroutine exit
+				defer func() {
 					if r := recover(); r != nil {
-						log.Printf("PANIC in render goroutine page %d: %v", pNum, r)
-						// Safe send - check if channel is still open
-						select {
-						case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("panic: %v", r)}:
-							// Sent successfully
-							log.Printf("Sent panic error for page %d", pNum)
-						default:
-							// Channel closed or full, skip
-							log.Printf("Could not send panic error for page %d - channel closed", pNum)
-						}
+						log.Printf("PANIC in render goroutine page %d: %v (goroutine exiting)", pNum, r)
+						// DO NOT send to resultChan here - channel may be closed
+						// The sequencer will timeout waiting for this page
 					}
-
-					// CRITICAL: Signal completion LAST after all channel operations
-					// This prevents resultChan from being closed while sends are in progress
-					renderWg.Done()
 				}()
 
 				console.MsgChan <- Message{
@@ -422,22 +421,15 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 
 				if err != nil {
 					log.Printf("ERROR rendering page %d: %v", pNum, err)
-					select {
-					case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: err}:
-					default:
-						log.Printf("Could not send error for page %d - channel closed", pNum)
-					}
+					// CRITICAL: Send to channel BEFORE defer chain executes
+					resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: err}
 					return
 				}
 
 				// Validate image before sending
 				if img == nil || img.Pix == nil || len(img.Pix) == 0 {
 					log.Printf("ERROR: page %d rendered nil or empty image", pNum)
-					select {
-					case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}:
-					default:
-						log.Printf("Could not send error for page %d - channel closed", pNum)
-					}
+					resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: nil, err: fmt.Errorf("rendered empty image")}
 					return
 				}
 
@@ -458,15 +450,9 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 					Color: colorNRGBA(0, 255, 0, 255), // Green
 				}
 
-				// Send COPY to printer, not original - prevents race conditions
-				// Use select with default to handle closed channel gracefully
-				select {
-				case resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: imgCopy, err: nil}:
-					// Sent successfully
-				default:
-					// Channel closed or full - this shouldn't happen in normal flow
-					log.Printf("Could not send result for page %d - channel closed", pNum)
-				}
+				// CRITICAL: Send result BEFORE defer chain starts unwinding
+				// This ensures send completes before renderWg.Done() is called
+				resultChan <- PageResult{jobID: job.JobID, pageNum: pNum, img: imgCopy, err: nil}
 			}(pageNum)
 		}
 	}()
