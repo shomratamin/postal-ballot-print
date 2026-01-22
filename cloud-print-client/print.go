@@ -39,6 +39,7 @@ type PrintJob struct {
 	PrinterName      string
 	PrintOrientation string
 	JobType          string
+	PrintBothSides   bool
 	JobName          string
 	Data             []byte // Data to be printed
 	Token            string // Job token
@@ -71,9 +72,11 @@ const (
 	// PRINT_EVENT_JOB_COMPLETED is the event for a print job being completed
 	PRINT_EVENT_JOB_COMPLETED = "job-completed"
 	// PRINT_EVENT_JOB_FAILED is the event for a print job failing
-	PRINT_EVENT_JOB_FAILED = "job-failed"
-
-	PRINT_EVENT_JOB_IGNORE = "job-ignore"
+	PRINT_EVENT_JOB_FAILED     = "job-failed"
+	PRINT_EVENT_QUEUE_LENGTH   = "queue-length"
+	PRINT_EVENT_JOB_IGNORE     = "job-ignore"
+	PRINT_EVENT_JOB_PROGRESS   = "job-progress"
+	PRINT_EVENT_QUEUE_PROGRESS = "print-queue-progress"
 )
 
 type PrintEvent struct {
@@ -125,6 +128,17 @@ type WindowsPrintEventLog struct {
 
 var printEventTracker = sync.Map{}
 var eck = []byte("ozi0o2wDwDO1fSgEvk9RElJbyFU25ike") // Must be 16, 24, or 32 bytes
+
+// PrintJobMonitorRequest represents a request to monitor a print job
+type PrintJobMonitorRequest struct {
+	PrinterName string
+	QueueID     int
+	JobID       string
+	TotalPages  int
+}
+
+// Global channel for print job monitoring requests
+var printJobMonitorChan = make(chan PrintJobMonitorRequest, 100)
 
 // PrintManager is responsible for managing print jobs
 type PrintManager struct {
@@ -190,6 +204,10 @@ func (pm *PrintManager) Start(console *Console) {
 		}
 
 	}()
+}
+
+func (pm *PrintManager) GetQueueLength() string {
+	return strconv.Itoa(len(pm.jobQueue))
 }
 
 // handlePrintJob adds a new print job to the queue
@@ -325,6 +343,11 @@ func (pm *PrintManager) processPDFPagesInMemory(pdfReader *model.PdfReader, numP
 	dpi := 200
 	widthPx := int(job.Width * float64(dpi))
 	heightPx := int(job.Height * float64(dpi))
+
+	// CRITICAL: Validate dimensions to prevent overflow
+	if widthPx <= 0 || heightPx <= 0 || widthPx > 100000 || heightPx > 100000 {
+		return fmt.Errorf("invalid page dimensions calculated: %dx%d", widthPx, heightPx)
+	}
 	console.MsgChan <- Message{
 		Text: fmt.Sprintf("Rendering at 200 DPI (%dpx x %dpx for %.1f\" x %.1f\")",
 			widthPx, heightPx, job.Width, job.Height),
@@ -467,11 +490,18 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 			if result.err != nil {
 				hasError = true
 				log.Printf("Sequencer: Page %d has error: %v", result.pageNum, result.err)
-				select {
-				case errChan <- fmt.Errorf("render page %d: %w", result.pageNum, result.err):
-				default:
-				}
-				// Continue draining resultChan to avoid goroutine leaks
+				// CRITICAL: Protected error send to prevent panic if errChan closes
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("Recovered from panic sending error: %v", r)
+						}
+					}()
+					select {
+					case errChan <- fmt.Errorf("render page %d: %w", result.pageNum, result.err):
+					default:
+					}
+				}()
 				continue
 			}
 
@@ -516,7 +546,15 @@ func (pm *PrintManager) printWithPipeline(pdfReader *model.PdfReader, numPages i
 					if nextPageToSend == 1 && !firstPageSignaled {
 						timeToFirstPage := time.Since(sequencerStart)
 						log.Printf("[TIMING] Sequencer: First page ready in %v, signaling printer initialization", timeToFirstPage)
-						close(firstPageReady)
+						// Protected close to prevent panic if already closed
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									log.Printf("Warning: firstPageReady already closed")
+								}
+							}()
+							close(firstPageReady)
+						}()
 						firstPageSignaled = true
 					}
 
@@ -657,21 +695,32 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 		log.Printf("⚠️  Invalid devModeSize %d, capping at 64KB", devModeSize)
 		devModeSize = 65536
 	}
-	if devModeSize < int32(unsafe.Sizeof(DEVMODE{})) {
-		log.Printf("⚠️  devModeSize %d too small, using minimum", devModeSize)
-		devModeSize = int32(unsafe.Sizeof(DEVMODE{}))
+	minDevModeSize := int32(unsafe.Sizeof(DEVMODE{}))
+	if devModeSize < minDevModeSize {
+		log.Printf("⚠️  devModeSize %d too small, using minimum %d", devModeSize, minDevModeSize)
+		devModeSize = minDevModeSize
+	}
+	// CRITICAL: Ensure DriverExtra won't underflow
+	if devModeSize-minDevModeSize < 0 {
+		log.Printf("ERROR: devModeSize calculation underflow detected")
+		devModeSize = minDevModeSize + 1024 // reasonable driver extra
 	}
 
 	// Allocate buffer and get printer's default DEVMODE
 	devModeBuffer := make([]byte, devModeSize)
-	// CRITICAL: Validate buffer before unsafe pointer cast
+	// CRITICAL: Validate buffer before unsafe pointer cast to prevent segfault
 	if len(devModeBuffer) < int(unsafe.Sizeof(DEVMODE{})) {
 		log.Printf("ERROR: devModeBuffer too small: %d bytes", len(devModeBuffer))
 		return fmt.Errorf("devModeBuffer allocation failed")
 	}
-	if len(devModeBuffer) == 0 {
-		log.Printf("ERROR: devModeBuffer is empty")
+	if len(devModeBuffer) == 0 || devModeBuffer == nil {
+		log.Printf("ERROR: devModeBuffer is empty or nil")
 		return fmt.Errorf("devModeBuffer is empty - cannot create DEVMODE pointer")
+	}
+	// CRITICAL: Additional safety check - ensure slice has valid backing array
+	if cap(devModeBuffer) < len(devModeBuffer) {
+		log.Printf("ERROR: devModeBuffer capacity < length, invalid slice")
+		return fmt.Errorf("invalid devModeBuffer slice")
 	}
 	devMode := (*DEVMODE)(unsafe.Pointer(&devModeBuffer[0]))
 	devMode.Size = uint16(unsafe.Sizeof(DEVMODE{}))
@@ -698,13 +747,22 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 	devMode.PaperSize = DMPAPER_USER // Custom size
 	devMode.PaperWidth = paperWidthMM
 	devMode.PaperLength = paperLengthMM
-	devMode.Duplex = DMDUP_SIMPLEX // Single-sided
 
 	// Set orientation
 	if job.PrintOrientation == "L" || job.PrintOrientation == "Landscape" {
 		devMode.Orientation = DMORIENT_LANDSCAPE
 	} else {
 		devMode.Orientation = DMORIENT_PORTRAIT
+	}
+
+	if job.PrintBothSides {
+		if job.PrintOrientation == "L" || job.PrintOrientation == "Landscape" {
+			devMode.Duplex = DMDUP_HORIZONTAL // Long-edge binding for landscape
+		} else {
+			devMode.Duplex = DMDUP_VERTICAL // Short-edge binding for portrait
+		}
+	} else {
+		devMode.Duplex = DMDUP_SIMPLEX
 	}
 
 	// CRITICAL: Skip DocumentProperties validation for Ricoh printers
@@ -719,9 +777,11 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 	if !skipValidation && hPrinter != 0 {
 		outputBuffer := make([]byte, devModeSize)
-		// CRITICAL: Validate output buffer before unsafe pointer cast
-		if len(outputBuffer) < int(unsafe.Sizeof(DEVMODE{})) {
-			log.Printf("⚠️  Output buffer too small, skipping validation")
+		// CRITICAL: Validate output buffer before unsafe pointer cast to prevent segfault
+		if len(outputBuffer) < int(unsafe.Sizeof(DEVMODE{})) || outputBuffer == nil {
+			log.Printf("⚠️  Output buffer too small or nil, skipping validation")
+		} else if cap(outputBuffer) < len(outputBuffer) {
+			log.Printf("⚠️  Output buffer has invalid capacity, skipping validation")
 		} else {
 			outputDevMode := (*DEVMODE)(unsafe.Pointer(&outputBuffer[0]))
 			outputDevMode.Size = uint16(unsafe.Sizeof(DEVMODE{}))
@@ -808,9 +868,25 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 	pageWidthPx, _, _ = procGetDeviceCaps.Call(hDC, HORZRES)
 	pageHeightPx, _, _ = procGetDeviceCaps.Call(hDC, VERTRES)
 
+	// CRITICAL: Validate dimensions are positive to prevent crashes
+	if pageWidthPx == 0 || pageHeightPx == 0 {
+		log.Printf("ERROR: Invalid printer dimensions: %dx%d", pageWidthPx, pageHeightPx)
+		return fmt.Errorf("printer returned invalid dimensions: %dx%d", pageWidthPx, pageHeightPx)
+	}
+	if pageWidthPx > 100000 || pageHeightPx > 100000 {
+		log.Printf("ERROR: Unreasonable printer dimensions: %dx%d", pageWidthPx, pageHeightPx)
+		return fmt.Errorf("printer dimensions too large: %dx%d", pageWidthPx, pageHeightPx)
+	}
+
 	// Get printer DPI
 	printerDpiX, _, _ = procGetDeviceCaps.Call(hDC, LOGPIXELSX)
 	printerDpiY, _, _ = procGetDeviceCaps.Call(hDC, LOGPIXELSY)
+
+	// CRITICAL: Validate DPI is reasonable
+	if printerDpiX == 0 || printerDpiY == 0 {
+		log.Printf("ERROR: Invalid printer DPI: X=%d Y=%d", printerDpiX, printerDpiY)
+		return fmt.Errorf("printer returned invalid DPI: %dx%d", printerDpiX, printerDpiY)
+	}
 
 	// CRITICAL: Use the SMALLER DPI to ensure uniform scaling and reduce memory usage
 	// This prevents aspect ratio distortion and works better with lower-end printers
@@ -1024,9 +1100,20 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 
 		// CRITICAL: Use 24-bit RGB DIB - directly from RGBA rendered image
 		// This provides maximum printer compatibility across all models including Ricoh
+		// CRITICAL: Validate stride calculation doesn't overflow
+		if imgWidth < 0 || imgWidth > 100000 {
+			return fmt.Errorf("image width out of valid range: %d", imgWidth)
+		}
 		stride := ((imgWidth*3 + 3) & ^3) // 3 bytes per pixel (RGB), DWORD-aligned
-
-		// CRITICAL: Set stretch mode for better image quality
+		if stride <= 0 {
+			return fmt.Errorf("invalid stride calculated: %d", stride)
+		}
+		// Check for multiplication overflow
+		var maxBufferSize int64 = 500 * 1024 * 1024 // 500MB max
+		bufferSize := int64(stride) * int64(imgHeight)
+		if bufferSize < 0 || bufferSize > maxBufferSize {
+			return fmt.Errorf("image buffer size invalid or too large: %d bytes", bufferSize)
+		}
 		procSetStretchBltMode.Call(hDC, HALFTONE) // HALFTONE = 4
 
 		// Create DIB section on first page only
@@ -1060,10 +1147,19 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 				0)
 
 			if reusableBitmap == 0 || reusablePBits == 0 {
-				return fmt.Errorf("failed to create reusable DIB section (GDI resource limit?)")
+				// CRITICAL: Manual cleanup before returning to prevent GDI handle leaks
+				log.Printf("ERROR: DIB section creation failed, cleaning up handles")
+				procDeleteDC.Call(memDC)
+				procReleaseDC.Call(0, screenDC)
+				if dibSectionCreated {
+					procSelectObject.Call(memDC, reusableOldBitmap)
+					procDeleteObject.Call(reusableBitmap)
+				}
+				return fmt.Errorf("failed to create DIB section for page %d", pageNum)
 			}
 
-			// Select DIB section into memory DC - do this ONCE
+			// CRITICAL: Select DIB section into memory DC - do this ONCE
+			// Without this, BitBlt will copy empty memory resulting in white pages!
 			reusableOldBitmap, _, _ = procSelectObject.Call(memDC, reusableBitmap)
 			dibSectionCreated = true
 
@@ -1075,7 +1171,7 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 				}
 			}()
 
-			log.Printf("Reusable DIB section created successfully")
+			log.Printf("Reusable DIB section created and selected into memory DC successfully")
 		}
 
 		// Copy image data to the reusable DIB section
@@ -1086,11 +1182,32 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			return fmt.Errorf("DIB section pBits is NULL for page %d", pageNum)
 		}
 
+		// CRITICAL: Validate stride and height to prevent integer overflow
+		if stride <= 0 || imgHeight <= 0 {
+			return fmt.Errorf("invalid stride or height: stride=%d, height=%d", stride, imgHeight)
+		}
+		maxSliceSize := stride * imgHeight
+		if maxSliceSize < 0 || maxSliceSize > 500*1024*1024 { // 500MB max
+			return fmt.Errorf("DIB buffer size too large or invalid: %d bytes", maxSliceSize)
+		}
+
 		// OPTIMIZED: Ultra-fast RGBA to BGR conversion with better cache locality
 		conversionStart := time.Now()
 		// DIB sections are bottom-up, so we need to flip rows
 		destSlice := (*[1 << 30]byte)(unsafe.Pointer(reusablePBits))[: stride*imgHeight : stride*imgHeight]
+		if len(destSlice) < stride*imgHeight {
+			return fmt.Errorf("destination slice size mismatch: %d < %d", len(destSlice), stride*imgHeight)
+		}
 		srcPix := img.Pix
+
+		// CRITICAL: Validate buffer sizes before conversion
+		expectedSrcSize := img.Stride * imgHeight
+		if len(srcPix) < expectedSrcSize {
+			return fmt.Errorf("source pixel buffer underrun: have %d, need %d", len(srcPix), expectedSrcSize)
+		}
+		if len(destSlice) < stride*imgHeight {
+			return fmt.Errorf("destination buffer underrun: have %d, need %d", len(destSlice), stride*imgHeight)
+		}
 
 		// Fast conversion with improved memory access pattern
 		for y := 0; y < imgHeight; y++ {
@@ -1102,6 +1219,10 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 			destIdx := destRowStart
 			srcIdx := srcRowStart
 			for x := 0; x < imgWidth; x++ {
+				// CRITICAL: Bounds check for source and destination
+				if srcIdx+3 >= len(srcPix) || destIdx+2 >= len(destSlice) {
+					return fmt.Errorf("buffer overflow at pixel (%d,%d): srcIdx=%d destIdx=%d", x, y, srcIdx, destIdx)
+				}
 				// BGR order for Windows DIB (skip alpha)
 				destSlice[destIdx] = srcPix[srcIdx+2]   // B
 				destSlice[destIdx+1] = srcPix[srcIdx+1] // G
@@ -1160,6 +1281,18 @@ func (pm *PrintManager) printPagesFromChannelWithInit(pageChan <-chan *image.RGB
 		log.Printf("[TIMING] Page %d: Total print time %v (resize: %v, conversion: %v, bitblt: %v)",
 			pageNum, pageTotalTime, resizeDuration, conversionDuration, bitbltDuration)
 		log.Printf("Successfully printed page %d/%d", pageNum, numPages)
+		progressPercent := (pageNum * 100) / numPages
+		pagesPrinted := pageNum
+		totalPages := numPages
+		// Send upstream progress update
+		if job.JobID != "test-print" {
+			progressMessage := fmt.Sprintf("Printing: %d/%d pages (%d%%)", pagesPrinted, totalPages, progressPercent)
+			outgoingMessages <- OutGoingLog{
+				JobID:   job.JobID,
+				Event:   PRINT_EVENT_JOB_PROGRESS,
+				Message: progressMessage,
+			}
+		}
 	}
 
 	// CRITICAL: Verify all pages were sent
@@ -1339,6 +1472,14 @@ func (pm *PrintManager) renderPDFPageDirect(pdfReader *model.PdfReader, pageNum,
 		for x := 0; x < bounds.Dx(); x++ {
 			srcX := bounds.Min.X + x
 			srcY := bounds.Min.Y + y
+
+			// CRITICAL: Validate pixel coordinates are within bounds
+			if srcX < bounds.Min.X || srcX >= bounds.Max.X || srcY < bounds.Min.Y || srcY >= bounds.Max.Y {
+				log.Printf("ERROR: Pixel access out of bounds: (%d,%d) vs bounds %v", srcX, srcY, bounds)
+				rgbaImg.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+				continue
+			}
+
 			originalColor := img.At(srcX, srcY)
 			rgbaColor := color.RGBAModel.Convert(originalColor)
 			rgba := rgbaColor.(color.RGBA)
@@ -1436,6 +1577,7 @@ func testPrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 			JobName:          printCmd.JobName,
 			JobType:          printCmd.JobType,
 			PrintOrientation: printCmd.PrintOrientation,
+			PrintBothSides:   printCmd.PrintBothSides,
 			Data:             pdfData,
 			Token:            "test-print",
 			Width:            printCmd.Width,
@@ -1467,6 +1609,7 @@ func LivePrint(console *Console, printManager *PrintManager, printCmd *PrintComm
 			PrinterName:      selectedPrinter,
 			JobName:          printCmd.JobName,
 			JobType:          printCmd.JobType,
+			PrintBothSides:   printCmd.PrintBothSides,
 			PrintOrientation: printCmd.PrintOrientation,
 			Data:             pdfData,
 			Token:            "live-print",
@@ -1500,6 +1643,7 @@ func SpecimenPrint(console *Console, printManager *PrintManager, printCmd *Print
 			JobName:          printCmd.JobName,
 			JobType:          printCmd.JobType,
 			PrintOrientation: printCmd.PrintOrientation,
+			PrintBothSides:   printCmd.PrintBothSides,
 			Data:             pdfData,
 			Token:            "specimen-print",
 			Width:            printCmd.Width,
@@ -1588,13 +1732,25 @@ func (pm *PrintManager) attachPrintQueueWithMonitoring(last_print_event LastPrin
 			// Print the parsed events
 			for _, event := range events {
 
-				eventConstant, queueID, err := extractQueueIDAndEvent(event.Description)
-				if err != nil {
-					console.MsgChan <- Message{
-						Text:  fmt.Sprintf("Error extracting event type: %v", err),
-						Color: colorNRGBA(255, 40, 0, 255), // Red
-					}
-					continue
+				queueID := event.QueueID
+				description := event.Description
+
+				// Determine event type from description
+				var eventConstant string
+				if strings.Contains(description, "Printing job") {
+					eventConstant = PRINT_EVENT_JOB_PRINTING
+				} else if strings.Contains(description, "Spooling job") {
+					eventConstant = PRINT_EVENT_JOB_STARTED
+				} else if strings.Contains(description, "Rendering job") {
+					eventConstant = PRINT_EVENT_JOB_RENDERING
+				} else if strings.Contains(description, "deleted") {
+					eventConstant = PRINT_EVENT_JOB_FAILED
+				} else if strings.Contains(description, "printed") {
+					eventConstant = PRINT_EVENT_JOB_COMPLETED
+				} else if strings.Contains(description, "Deleting job") {
+					eventConstant = PRINT_EVENT_JOB_FAILED
+				} else {
+					eventConstant = PRINT_EVENT_JOB_IGNORE
 				}
 
 				switch eventConstant {
@@ -1631,10 +1787,15 @@ func (pm *PrintManager) attachPrintQueueWithMonitoring(last_print_event LastPrin
 						Color: colorNRGBA(0, 255, 255, 255), // Cyan
 					}
 
-					// Start monitoring goroutine after spooling event found
+					// Send to print queue monitoring service
 					if !monitoringStarted {
 						monitoringStarted = true
-						go pm.monitorPrintProgress(printerName, queue_id, last_print_event.JobID, totalPages, console)
+						printJobMonitorChan <- PrintJobMonitorRequest{
+							PrinterName: printerName,
+							QueueID:     queue_id,
+							JobID:       last_print_event.JobID,
+							TotalPages:  totalPages,
+						}
 					}
 
 					break
@@ -1656,150 +1817,212 @@ func (pm *PrintManager) attachPrintQueueWithMonitoring(last_print_event LastPrin
 	}
 }
 
-// monitorPrintProgress monitors Windows print queue and reports page progress
-func (pm *PrintManager) monitorPrintProgress(printerName string, queueID int, jobID string, totalPages int, console *Console) {
-	log.Printf("Starting print progress monitor for Queue ID %d, Job %s", queueID, jobID)
+// TrackedPrintJob represents a job being monitored
+type TrackedPrintJob struct {
+	PrinterName      string
+	QueueID          int
+	JobID            string
+	TotalPages       int
+	LastPagesPrinted uint32
+	HPrinter         syscall.Handle
+}
 
-	console.MsgChan <- Message{
-		Text:  fmt.Sprintf("Monitoring print progress for job %s (Queue ID: %d)", jobID, queueID),
-		Color: colorNRGBA(0, 255, 255, 255), // Cyan
-	}
+// monitorPrintQueueService is a dedicated service that monitors multiple print jobs
+func monitorPrintQueueService(printMngr *PrintManager, console *Console) {
+	log.Println("Starting dedicated print queue monitoring service")
 
-	// Open printer handle
-	printerNamePtr, _ := syscall.UTF16PtrFromString(printerName)
-	var hPrinter syscall.Handle
-	ret, _, _ := procOpenPrinter.Call(
-		uintptr(unsafe.Pointer(printerNamePtr)),
-		uintptr(unsafe.Pointer(&hPrinter)),
-		0)
-	if ret == 0 {
-		log.Printf("Failed to open printer for monitoring: %s", printerName)
-		return
-	}
-	defer procClosePrinter.Call(uintptr(hPrinter))
+	// Map to track active print jobs
+	trackedJobs := make(map[int]*TrackedPrintJob)
+	var mu sync.Mutex
 
-	lastPagesPrinted := uint32(0)
-	jobCompleted := false
-	monitoringActive := true
+	// Listen for new jobs to monitor
+	go func() {
+		for req := range printJobMonitorChan {
+			mu.Lock()
 
-	// Monitor loop - runs until job completes or fails
-	// OPTIMIZED: Reduced from 150ms to 500ms to minimize spooler contention
-	for monitoringActive {
-		time.Sleep(500 * time.Millisecond) // Check every 500ms (was 150ms)
+			log.Printf("Received monitoring request for Job %s (Queue ID: %d)", req.JobID, req.QueueID)
 
-		// Check if job still exists in tracker
-		if _, ok := printEventTracker.Load(strconv.Itoa(queueID)); !ok {
-			log.Printf("Job %d removed from tracker, stopping monitor", queueID)
-			break
+			// Open printer handle
+			printerNamePtr, _ := syscall.UTF16PtrFromString(req.PrinterName)
+			var hPrinter syscall.Handle
+			ret, _, _ := procOpenPrinter.Call(
+				uintptr(unsafe.Pointer(printerNamePtr)),
+				uintptr(unsafe.Pointer(&hPrinter)),
+				0)
+
+			if ret == 0 {
+				log.Printf("Failed to open printer for monitoring: %s", req.PrinterName)
+				mu.Unlock()
+				continue
+			}
+
+			// Add job to tracked list
+			trackedJobs[req.QueueID] = &TrackedPrintJob{
+				PrinterName:      req.PrinterName,
+				QueueID:          req.QueueID,
+				JobID:            req.JobID,
+				TotalPages:       req.TotalPages,
+				LastPagesPrinted: 0,
+				HPrinter:         hPrinter,
+			}
+
+			console.MsgChan <- Message{
+				Text:  fmt.Sprintf("Now monitoring job %s (Queue ID: %d)", req.JobID, req.QueueID),
+				Color: colorNRGBA(0, 255, 255, 255), // Cyan
+			}
+
+			mu.Unlock()
 		}
+	}()
 
-		// Query print job details
-		var bytesNeeded uint32
-		var jobCount uint32
+	// Main monitoring loop - checks all jobs periodically
+	for {
+		time.Sleep(500 * time.Millisecond)
 
-		// First call to get required buffer size
-		procEnumJobs.Call(
-			uintptr(hPrinter),
-			0,    // FirstJob
-			1000, // NoJobs (query up to 1000 jobs)
-			1,    // Level (JOB_INFO_1)
-			0,    // pJob (NULL to get size)
-			0,    // cbBuf
-			uintptr(unsafe.Pointer(&bytesNeeded)),
-			uintptr(unsafe.Pointer(&jobCount)))
+		mu.Lock()
 
-		if bytesNeeded == 0 {
+		if len(trackedJobs) == 0 {
+			mu.Unlock()
 			continue
 		}
 
-		// Allocate buffer and get actual job data
-		jobBuffer := make([]byte, bytesNeeded)
-		ret, _, _ := procEnumJobs.Call(
-			uintptr(hPrinter),
-			0,
-			1000,
-			1,
-			uintptr(unsafe.Pointer(&jobBuffer[0])),
-			uintptr(bytesNeeded),
-			uintptr(unsafe.Pointer(&bytesNeeded)),
-			uintptr(unsafe.Pointer(&jobCount)))
+		var statusBuilder strings.Builder
+		var completedJobs []int
 
-		if ret == 0 {
-			continue
-		}
+		// Check each tracked job
+		for queueID, job := range trackedJobs {
+			// Check if job still exists in event tracker
+			if _, ok := printEventTracker.Load(strconv.Itoa(queueID)); !ok {
+				log.Printf("Job %d removed from tracker, stopping monitoring", queueID)
+				procClosePrinter.Call(uintptr(job.HPrinter))
+				completedJobs = append(completedJobs, queueID)
+				continue
+			}
 
-		// Parse job information
-		jobInfoSize := unsafe.Sizeof(JOB_INFO_1{})
-		for i := uint32(0); i < jobCount; i++ {
-			offset := uintptr(i) * jobInfoSize
-			jobInfo := (*JOB_INFO_1)(unsafe.Pointer(&jobBuffer[offset]))
+			// Query print job details
+			var bytesNeeded uint32
+			var jobCount uint32
 
-			// Find our job by Queue ID
-			if jobInfo.JobId == uint32(queueID) {
-				pagesPrinted := jobInfo.PagesPrinted
-				totalPagesInQueue := jobInfo.TotalPages
+			procEnumJobs.Call(
+				uintptr(job.HPrinter),
+				0, 1000, 1, 0, 0,
+				uintptr(unsafe.Pointer(&bytesNeeded)),
+				uintptr(unsafe.Pointer(&jobCount)))
 
-				// Update total pages if queue has more accurate info
-				if totalPagesInQueue > 0 && totalPages == 0 {
-					totalPages = int(totalPagesInQueue)
-				}
+			if bytesNeeded == 0 {
+				continue
+			}
 
-				// Send update if pages printed changed
-				if pagesPrinted != lastPagesPrinted {
-					lastPagesPrinted = pagesPrinted
+			// CRITICAL: Validate bytesNeeded is reasonable before allocating
+			if bytesNeeded > 10*1024*1024 { // 10MB max
+				log.Printf("WARNING: bytesNeeded suspiciously large: %d bytes", bytesNeeded)
+				continue
+			}
 
-					progressPercent := 0
-					if totalPages > 0 {
-						progressPercent = int((float64(pagesPrinted) / float64(totalPages)) * 100)
-					}
+			jobBuffer := make([]byte, bytesNeeded)
+			// CRITICAL: Validate buffer before unsafe pointer to prevent segfault
+			if len(jobBuffer) == 0 || jobBuffer == nil {
+				log.Printf("ERROR: Failed to allocate jobBuffer")
+				continue
+			}
+			if len(jobBuffer) < int(unsafe.Sizeof(JOB_INFO_1{})) {
+				log.Printf("ERROR: jobBuffer too small for JOB_INFO_1")
+				continue
+			}
+			ret, _, _ := procEnumJobs.Call(
+				uintptr(job.HPrinter),
+				0, 1000, 1,
+				uintptr(unsafe.Pointer(&jobBuffer[0])),
+				uintptr(bytesNeeded),
+				uintptr(unsafe.Pointer(&bytesNeeded)),
+				uintptr(unsafe.Pointer(&jobCount)))
 
-					log.Printf("Job %s progress: %d/%d pages (%d%%) - Status: 0x%X",
-						jobID, pagesPrinted, totalPages, progressPercent, jobInfo.StatusCode)
+			if ret == 0 {
+				continue
+			}
 
-					console.MsgChan <- Message{
-						Text:  fmt.Sprintf("Job %s: %d/%d pages printed (%d%%)", jobID, pagesPrinted, totalPages, progressPercent),
-						Color: colorNRGBA(0, 255, 255, 255), // Cyan
-					}
-
-					// Send upstream progress update
-					if jobID != "test-print" {
-						progressMessage := fmt.Sprintf("Printing: %d/%d pages (%d%%)", pagesPrinted, totalPages, progressPercent)
-						outgoingMessages <- OutGoingLog{
-							JobID:   jobID,
-							Event:   "job-progress",
-							Message: progressMessage,
-						}
-					}
-				}
-
-				// Check job status for completion or errors
-				if jobInfo.StatusCode&JOB_STATUS_PRINTED != 0 ||
-					jobInfo.StatusCode&JOB_STATUS_DELETED != 0 {
-					log.Printf("Job %d completed/deleted, stopping monitor", queueID)
-					jobCompleted = true
-					monitoringActive = false
+			// Parse job information
+			jobInfoSize := unsafe.Sizeof(JOB_INFO_1{})
+			for i := uint32(0); i < jobCount; i++ {
+				offset := uintptr(i) * jobInfoSize
+				// CRITICAL: Bounds check before unsafe pointer access
+				if offset+jobInfoSize > uintptr(len(jobBuffer)) {
+					log.Printf("ERROR: jobBuffer offset out of bounds: %d + %d > %d", offset, jobInfoSize, len(jobBuffer))
 					break
 				}
+				jobInfo := (*JOB_INFO_1)(unsafe.Pointer(&jobBuffer[offset]))
 
-				if jobInfo.StatusCode&JOB_STATUS_ERROR != 0 ||
-					jobInfo.StatusCode&JOB_STATUS_USER_INTERVENTION != 0 {
-					log.Printf("Job %d has error status: 0x%X, continuing to monitor", queueID, jobInfo.StatusCode)
-					// Don't stop monitoring on errors, job might recover
+				if jobInfo.JobId == uint32(queueID) {
+					pagesPrinted := jobInfo.PagesPrinted
+					totalPagesInQueue := jobInfo.TotalPages
+
+					// Update total pages if queue has more accurate info
+					if totalPagesInQueue > 0 && job.TotalPages == 0 {
+						job.TotalPages = int(totalPagesInQueue)
+					}
+
+					// Add job status to builder (always add, even if no change)
+					progressPercent := 0
+					if job.TotalPages > 0 {
+						progressPercent = int((float64(pagesPrinted) / float64(job.TotalPages)) * 100)
+						// CRITICAL: Clamp to valid range to prevent display issues
+						if progressPercent > 100 {
+							progressPercent = 100
+						}
+					} else if pagesPrinted > 0 {
+						// If we don't know total pages but have printed some, show indeterminate
+						progressPercent = -1
+					}
+
+					statusStr := "Active"
+					if jobInfo.StatusCode&JOB_STATUS_PRINTING != 0 {
+						statusStr = "Printing"
+					} else if jobInfo.StatusCode&JOB_STATUS_SPOOLING != 0 {
+						statusStr = "Spooling"
+					} else if jobInfo.StatusCode&JOB_STATUS_PAUSED != 0 {
+						statusStr = "Paused"
+					} else if jobInfo.StatusCode&JOB_STATUS_ERROR != 0 {
+						statusStr = "Error"
+					}
+
+					statusBuilder.WriteString(fmt.Sprintf("%s: %d/%d pages (%d%%) - %s\n",
+						job.JobID, pagesPrinted, job.TotalPages, progressPercent, statusStr))
+
+					// Log if pages changed
+					if pagesPrinted != job.LastPagesPrinted {
+						job.LastPagesPrinted = pagesPrinted
+						log.Printf("Job %s progress: %d/%d pages (%d%%)", job.JobID, pagesPrinted, job.TotalPages, progressPercent)
+					}
+
+					// Check for completion
+					if jobInfo.StatusCode&JOB_STATUS_PRINTED != 0 || jobInfo.StatusCode&JOB_STATUS_DELETED != 0 {
+						log.Printf("Job %d completed/deleted", queueID)
+						procClosePrinter.Call(uintptr(job.HPrinter))
+						completedJobs = append(completedJobs, queueID)
+					}
+
+					break
 				}
-
-				break
 			}
 		}
-	}
 
-	if jobCompleted {
-		console.MsgChan <- Message{
-			Text:  fmt.Sprintf("Print monitoring completed for job %s", jobID),
-			Color: colorNRGBA(0, 255, 0, 255), // Green
+		// Remove completed jobs
+		for _, queueID := range completedJobs {
+			delete(trackedJobs, queueID)
 		}
-	}
 
-	log.Printf("Print progress monitor stopped for Queue ID %d, Job %s", queueID, jobID)
+		// Send consolidated status update if there are active jobs
+		if statusBuilder.Len() > 0 {
+			statusMessage := strings.TrimSuffix(statusBuilder.String(), "\n")
+			outgoingMessages <- OutGoingLog{
+				JobID:   "queue-status",
+				Event:   "print-queue-progress",
+				Message: statusMessage,
+			}
+		}
+
+		mu.Unlock()
+	}
 }
 
 // getPrintQueue retrieves the print queue for a specific printer
@@ -1870,13 +2093,25 @@ func (pm *PrintManager) getPrintLastQueue(job_id string, console *Console) (Last
 			// Print the parsed events
 			for _, event := range events {
 
-				eventConstant, queueID, err := extractQueueIDAndEvent(event.Description)
-				if err != nil {
-					console.MsgChan <- Message{
-						Text:  fmt.Sprintf("Error extracting event type: %v", err),
-						Color: colorNRGBA(255, 40, 0, 255), // Red
-					}
-					continue
+				queueID := event.QueueID
+				description := event.Description
+
+				// Determine event type from description
+				var eventConstant string
+				if strings.Contains(description, "Printing job") {
+					eventConstant = PRINT_EVENT_JOB_PRINTING
+				} else if strings.Contains(description, "Spooling job") {
+					eventConstant = PRINT_EVENT_JOB_STARTED
+				} else if strings.Contains(description, "Rendering job") {
+					eventConstant = PRINT_EVENT_JOB_RENDERING
+				} else if strings.Contains(description, "deleted") {
+					eventConstant = PRINT_EVENT_JOB_FAILED
+				} else if strings.Contains(description, "printed") {
+					eventConstant = PRINT_EVENT_JOB_COMPLETED
+				} else if strings.Contains(description, "Deleting job") {
+					eventConstant = PRINT_EVENT_JOB_FAILED
+				} else {
+					eventConstant = PRINT_EVENT_JOB_IGNORE
 				}
 
 				switch eventConstant {
@@ -1916,7 +2151,7 @@ func (pm *PrintManager) getPrintLastQueue(job_id string, console *Console) (Last
 	return last_print_event, errors.New("last print event not found")
 }
 
-func getAllPrintServiceLogs(console *Console) {
+func getAllPrintServiceLogs(console *Console, printMng *PrintManager) {
 	for {
 
 		// Sleep for 200 ms before checking for new events
@@ -1982,14 +2217,27 @@ func getAllPrintServiceLogs(console *Console) {
 
 					print_event := value.(PrintEvent) // Type assertion
 
-					eventConstant, queueID, err := extractQueueIDAndEvent(event.Description)
-					if err != nil {
-						console.MsgChan <- Message{
-							Text:  fmt.Sprintf("Error extracting event type: %v", err),
-							Color: colorNRGBA(255, 40, 0, 255), // Red
-						}
-						continue
+					queueID := event.QueueID
+					description := event.Description
+
+					// Determine event type from description
+					var eventConstant string
+					if strings.Contains(description, "Printing job") {
+						eventConstant = PRINT_EVENT_JOB_PRINTING
+					} else if strings.Contains(description, "Spooling job") {
+						eventConstant = PRINT_EVENT_JOB_STARTED
+					} else if strings.Contains(description, "Rendering job") {
+						eventConstant = PRINT_EVENT_JOB_RENDERING
+					} else if strings.Contains(description, "deleted") {
+						eventConstant = PRINT_EVENT_JOB_FAILED
+					} else if strings.Contains(description, "printed") {
+						eventConstant = PRINT_EVENT_JOB_COMPLETED
+					} else if strings.Contains(description, "Deleting job") {
+						eventConstant = PRINT_EVENT_JOB_FAILED
+					} else {
+						eventConstant = PRINT_EVENT_JOB_IGNORE
 					}
+
 					if queueID == print_event.QueueID {
 
 						switch eventConstant {
@@ -2234,51 +2482,12 @@ func extractQueueID(description string) (int, error) {
 		return 0, fmt.Errorf("failed to parse queue ID: %v", err)
 	}
 
+	// CRITICAL: Validate queue ID is positive and reasonable
+	if queueID <= 0 || queueID > 999999 { // Sanity check for queue ID range
+		return 0, fmt.Errorf("invalid queue ID value: %d", queueID)
+	}
+
 	return queueID, nil
-}
-
-// Extracts the queue ID and event type from the Description field
-func extractQueueIDAndEvent(description string) (string, int, error) {
-	// Regex to match event types and queue IDs (Printing job, Spooling job, Rendering job, Document)
-	// Captures both the event type and the queue ID (number)
-	re := regexp.MustCompile(`(?i)(Printing job|Spooling job|Rendering job|Deleting job|Document|document)\s*(\d+)[\.,]?`)
-	matches := re.FindStringSubmatch(description)
-
-	if len(matches) < 3 {
-		return "", 0, fmt.Errorf("event or queue ID not found in description: %s", description)
-	}
-
-	// Extract the event type (matches[1]) and the queue ID (matches[2])
-	eventType := matches[1]
-	queueID, err := strconv.Atoi(matches[2])
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to parse queue ID: %v", err)
-	}
-
-	// Map event type to constant
-	var eventConstant string
-	switch eventType {
-	case "Printing job":
-		eventConstant = PRINT_EVENT_JOB_PRINTING
-	case "Spooling job":
-		eventConstant = PRINT_EVENT_JOB_STARTED
-	case "Rendering job":
-		eventConstant = PRINT_EVENT_JOB_RENDERING
-	case "Document", "document":
-		if strings.Contains(description, "deleted") {
-			eventConstant = PRINT_EVENT_JOB_FAILED
-		} else if strings.Contains(description, "printed") {
-			eventConstant = PRINT_EVENT_JOB_COMPLETED
-		} else {
-			eventConstant = PRINT_EVENT_JOB_IGNORE
-		}
-	case "Deleting job":
-		eventConstant = PRINT_EVENT_JOB_FAILED
-	default:
-		return "", 0, fmt.Errorf("unknown event type: %s", eventType)
-	}
-
-	return eventConstant, queueID, nil
 }
 
 func saveToEncryptedFile(filePath string, key []byte) error {
@@ -2394,11 +2603,15 @@ func decryptData(data []byte, key []byte) ([]byte, error) {
 	iv := data[:aes.BlockSize]
 	cipherData := data[aes.BlockSize:]
 
+	// CRITICAL: Create a copy to avoid modifying input buffer (causes issues on retry)
+	result := make([]byte, len(cipherData))
+	copy(result, cipherData)
+
 	// Decrypt the data
 	stream := cipher.NewCFBDecrypter(block, iv)
-	stream.XORKeyStream(cipherData, cipherData)
+	stream.XORKeyStream(result, result)
 
-	return cipherData, nil
+	return result, nil
 }
 
 // ===== OPTIMIZED PDF PROCESSING COMPLETE =====
@@ -2647,22 +2860,22 @@ func resizeRGBAFast(src *image.RGBA, targetWidth, targetHeight int) *image.RGBA 
 		if srcY >= srcHeight {
 			srcY = srcHeight - 1
 		}
-		dstOffset := dst.PixOffset(0, y)
-		srcOffset := src.PixOffset(srcBounds.Min.X, srcBounds.Min.Y+srcY)
 
 		for x := 0; x < targetWidth; x++ {
 			srcX := int(float64(x) * xRatio)
 			if srcX >= srcWidth {
 				srcX = srcWidth - 1
 			}
-			srcIdx := srcOffset + srcX*4
-			dstIdx := dstOffset + x*4
 
-			// Fast 4-byte copy (RGBA)
-			dst.Pix[dstIdx] = src.Pix[srcIdx]
-			dst.Pix[dstIdx+1] = src.Pix[srcIdx+1]
-			dst.Pix[dstIdx+2] = src.Pix[srcIdx+2]
-			dst.Pix[dstIdx+3] = src.Pix[srcIdx+3]
+			// CRITICAL: Use safe pixel access with bounds validation
+			if srcX < srcBounds.Min.X || srcX >= srcBounds.Max.X || srcY < srcBounds.Min.Y || srcY >= srcBounds.Max.Y {
+				dst.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+				continue
+			}
+
+			// Use safe SetRGBA instead of direct pixel manipulation
+			srcColor := src.RGBAAt(srcX, srcY)
+			dst.SetRGBA(x, y, srcColor)
 		}
 	}
 
@@ -2710,7 +2923,11 @@ func resizeRGBA(src *image.RGBA, targetWidth, targetHeight int) *image.RGBA {
 			x1 := x0 + 1
 			y1 := y0 + 1
 
-			// Clamp to bounds
+			// CRITICAL: Clamp to valid bounds and validate
+			if x0 < 0 || y0 < 0 {
+				dst.SetRGBA(x, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+				continue
+			}
 			if x1 >= srcWidth {
 				x1 = srcWidth - 1
 			}
@@ -2722,7 +2939,7 @@ func resizeRGBA(src *image.RGBA, targetWidth, targetHeight int) *image.RGBA {
 			fx := srcX - float64(x0)
 			fy := srcY - float64(y0)
 
-			// Get four neighboring pixels
+			// Get four neighboring pixels (with bounds validation)
 			p00 := src.RGBAAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y0)
 			p10 := src.RGBAAt(srcBounds.Min.X+x1, srcBounds.Min.Y+y0)
 			p01 := src.RGBAAt(srcBounds.Min.X+x0, srcBounds.Min.Y+y1)

@@ -82,11 +82,11 @@ func NewAppSettings() *AppSettings {
 		LIVE_PDf_URL:     "https://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
 		SPECIMEN_PDF_URL: "https://election2026.ekdak.com/v1/api/print/envelope-pdf-specimen-generator/",
 		INTERNAL_PDF_URL: "https://election2026.ekdak.com/v1/api/print/envelope-pdf-generator/",
-		// SOCKET_URL:       "wss://election2026.ekdak.com/v1/ws",
+		SOCKET_URL:       "wss://election2026.ekdak.com/v1/ws",
 		// LIVE_PDf_URL:      "http://localhost:8056/api/print/envelope-pdf-generator/",
 		// SPECIMEN_PDF_URL:  "http://localhost:8056/api/print/envelope-pdf-specimen-generator/",
 		// INTERNAL_PDF_URL:  "http://localhost:8056/api/print/envelope-pdf-generator/",
-		SOCKET_URL:        "ws://192.168.1.19:8056/ws",
+		// SOCKET_URL:        "ws://localhost:8056/ws",
 		WT_DIM_MACHINE_ID: "",
 		CAMERA_ID:         "",
 		// Auto-update settings with defaults

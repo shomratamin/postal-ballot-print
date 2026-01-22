@@ -131,6 +131,7 @@ func drawLEDIndicator(gtx C, col color.NRGBA) D {
 }
 
 var printerList widget.Enum
+var previousPrinterSelection string
 
 // loop is the main event loop for the application
 func loop(w *app.Window, console *Console, printManager *PrintManager, printersChan <-chan []PrinterStatus, client_id string) error {
@@ -656,7 +657,28 @@ func loop(w *app.Window, console *Console, printManager *PrintManager, printersC
 			} else {
 				machineIdBtnClicked = false
 			}
+			// Detect printer selection change and send to server
+			if printerList.Value != "" && printerList.Value != previousPrinterSelection {
+				previousPrinterSelection = printerList.Value
 
+				// Log to console
+				console.MsgChan <- Message{
+					Text:  fmt.Sprintf("Printer selected: %s", printerList.Value),
+					Color: color.NRGBA{R: 0, G: 255, B: 255, A: 255}, // Cyan
+				}
+
+				// Send printer selection event to server via websocket
+				printerSelectedMsg := OutGoingLog{
+					Event:   "printer-selected",
+					JobID:   client_id,
+					Message: printerList.Value,
+				}
+
+				// Queue message for sending
+				outgoingMessages <- printerSelectedMsg
+
+				log.Printf("Printer selection event sent: %s", printerList.Value)
+			}
 			// Handle Test Print button click
 			if testPrintBtn.Pressed() {
 				if !testPrintBtnClicked {

@@ -70,7 +70,8 @@ func main() {
 	// Start message sender
 	go sendMessageWorker(console)
 	// go getPrintQueue(console)
-	go getAllPrintServiceLogs(console)
+	go getAllPrintServiceLogs(console, printManager)
+	go monitorPrintQueueService(printManager, console)
 	go PingPong()
 	// Start the Gio event loop
 	go weightdimensionMachineManager.StartMachine(console)
